@@ -1,23 +1,27 @@
+import csv
+import datetime
 import tkinter as tk
-from tkinter import messagebox, scrolledtext, ttk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Callable, List, Optional
 
 from app.config import AppConfig
 from app.serial_handler import SerialHandler
 from app.test_runner import TestCase, TestResult, TestRunner
 
-_RESULT_COLORS = {
-    "PASS":    "#00FF7F",
-    "FAIL":    "#FF4444",
-    "TIMEOUT": "#FFD700",
-    "ERROR":   "#FF8C00",
+# background / foreground for each result box
+_RESULT_TAGS = {
+    "PASS":    {"background": "#0D3B1F", "foreground": "#00FF7F"},
+    "FAIL":    {"background": "#3B0D0D", "foreground": "#FF5555"},
+    "TIMEOUT": {"background": "#3B2D00", "foreground": "#FFD700"},
+    "ERROR":   {"background": "#3B1A00", "foreground": "#FF9100"},
 }
 
 _CHECKBOX_CHECKED = "☑"
 _CHECKBOX_EMPTY   = "☐"
 
-_COLUMNS = ("enabled", "nav", "name", "command", "expected", "terminator", "timeout_ms")
+_COLUMNS = ("enabled", "nav", "name", "command", "expected", "terminator", "timeout_ms", "result")
 _HEADINGS = {
+    "result":      "Result",
     "enabled":     "✓",
     "nav":         "⚙",   # indicates setup/teardown navigation steps present
     "name":        "Name",
@@ -27,6 +31,7 @@ _HEADINGS = {
     "timeout_ms":  "Timeout (ms)",
 }
 _WIDTHS = {
+    "result":     80,
     "enabled":    30,
     "nav":        24,
     "name":       140,
@@ -34,6 +39,20 @@ _WIDTHS = {
     "expected":   160,
     "terminator": 80,
     "timeout_ms": 80,
+}
+
+# Treeview row tags for each result state
+_ROW_TAGS = {
+    "PASS":    {"foreground": "#00FF7F"},
+    "FAIL":    {"foreground": "#FF5555"},
+    "TIMEOUT": {"foreground": "#FFD700"},
+    "ERROR":   {"foreground": "#FF9100"},
+}
+_RESULT_LABEL = {
+    "PASS":    "✔  PASS",
+    "FAIL":    "✘  FAIL",
+    "TIMEOUT": "⏱  TIMEOUT",
+    "ERROR":   "⚠  ERROR",
 }
 
 
@@ -51,6 +70,15 @@ class TestSuitePanel(ttk.Frame):
         self._pass_count = 0
         self._fail_count = 0
         self._total_count = 0
+        # Maps test ID → result label string; persists across tree repopulations
+        self._result_map: dict = {}
+        # Accumulated results for the current (or most recent) run
+        self._run_results: List[TestResult] = []
+        self._run_timestamps: List[datetime.datetime] = []
+        # Loop mode state
+        self._loop_var = tk.BooleanVar(value=False)
+        self._current_run_tests: List[TestCase] = []
+        self._stop_requested: bool = False
 
         self._setup_ui()
         self._load_tests_from_config()
@@ -91,6 +119,9 @@ class TestSuitePanel(ttk.Frame):
         self._tree.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
 
+        for tag_name, colors in _ROW_TAGS.items():
+            self._tree.tag_configure(tag_name, **colors)
+
         self._tree.bind("<Double-1>", lambda _: self._edit_test())
         self._tree.bind("<Button-1>", self._on_tree_click)
 
@@ -114,6 +145,9 @@ class TestSuitePanel(ttk.Frame):
         self._stop_btn.pack(side="left", padx=2)
 
         ttk.Separator(run_bar, orient="vertical").pack(side="left", padx=8, fill="y")
+        ttk.Checkbutton(run_bar, text="↻ Loop", variable=self._loop_var).pack(side="left", padx=2)
+
+        ttk.Separator(run_bar, orient="vertical").pack(side="left", padx=8, fill="y")
         ttk.Label(run_bar, text="Delay between tests (ms):").pack(side="left")
         self._delay_var = tk.StringVar(value=str(self._config.get("test_delay_ms", 200)))
         ttk.Spinbox(run_bar, from_=0, to=10000, increment=50,
@@ -130,8 +164,8 @@ class TestSuitePanel(ttk.Frame):
             relief="flat",
         )
         self._results.grid(row=3, column=0, sticky="nsew", padx=4, pady=(0, 2))
-        for status, color in _RESULT_COLORS.items():
-            self._results.tag_configure(status, foreground=color)
+        for status, colors in _RESULT_TAGS.items():
+            self._results.tag_configure(status, **colors, font=("Courier", 9, "bold"))
         self._results.tag_configure("header", foreground="#AAAAAA")
 
         # --- Summary bar ---
@@ -141,6 +175,7 @@ class TestSuitePanel(ttk.Frame):
         self._summary_var = tk.StringVar(value="No results yet")
         ttk.Label(summary_bar, textvariable=self._summary_var).pack(side="left")
         ttk.Button(summary_bar, text="Clear Results", command=self._clear_results).pack(side="right")
+        ttk.Button(summary_bar, text="Export CSV…", command=self._export_csv).pack(side="right", padx=4)
 
         self.set_enabled(False)
 
@@ -152,6 +187,9 @@ class TestSuitePanel(ttk.Frame):
         self._tree.delete(*self._tree.get_children())
         for tc in self._tests:
             has_nav = bool(tc.setup_commands or tc.teardown_commands)
+            result_entry = self._result_map.get(tc.id)  # (label, status) or None
+            result_label = result_entry[0] if result_entry else ""
+            result_tag   = result_entry[1] if result_entry else ""
             self._tree.insert(
                 "", "end", iid=tc.id,
                 values=(
@@ -162,7 +200,9 @@ class TestSuitePanel(ttk.Frame):
                     tc.expected,
                     tc.terminator,
                     tc.timeout_ms,
+                    result_label,
                 ),
+                tags=(result_tag,) if result_tag else (),
             )
 
     def _selected_test(self) -> Optional[TestCase]:
@@ -396,9 +436,21 @@ class TestSuitePanel(ttk.Frame):
             messagebox.showwarning("Not Connected", "Connect to a serial port first.")
             return
 
+        self._current_run_tests = tests
+        self._stop_requested = False
         self._pass_count = 0
         self._fail_count = 0
         self._total_count = len(tests)
+        self._run_results = []
+        self._run_timestamps = []
+
+        # Reset the result column for tests that are about to run
+        for tc in tests:
+            self._result_map.pop(tc.id, None)
+            if self._tree.exists(tc.id):
+                self._tree.set(tc.id, "result", "")
+                self._tree.item(tc.id, tags=())
+
         self._append_result(
             f"── Running {len(tests)} test(s) ──", "header"
         )
@@ -428,16 +480,31 @@ class TestSuitePanel(ttk.Frame):
         )
 
     def _stop_run(self) -> None:
+        self._stop_requested = True
         self._runner.stop()
 
     def _on_result(self, result: TestResult) -> None:
         status = result.status
-        actual_preview = result.actual.replace("\n", " | ")[:60]
+        label = _RESULT_LABEL.get(status, status)
+
+        # Update the treeview row live
+        self._result_map[result.test.id] = (label, status)
+        if self._tree.exists(result.test.id):
+            self._tree.set(result.test.id, "result", label)
+            self._tree.item(result.test.id, tags=(status,))
+
+        # Also append to the results log panel below
+        _ICON = {"PASS": "✔", "FAIL": "✘", "TIMEOUT": "⏱", "ERROR": "⚠"}
+        actual_preview = result.actual.replace("\n", " | ")[:50]
         line = (
-            f"[{status:7s}] {result.test.name!r} — "
-            f"{result.duration_ms:.0f}ms — {actual_preview}"
+            f" {_ICON.get(status, '?')} {status:<7s}  {result.test.name}  "
+            f"({result.duration_ms:.0f}ms)"
+            + (f"  {actual_preview}" if actual_preview else "")
         )
         self._append_result(line, status)
+
+        self._run_results.append(result)
+        self._run_timestamps.append(datetime.datetime.now())
 
         if status == "PASS":
             self._pass_count += 1
@@ -451,14 +518,52 @@ class TestSuitePanel(ttk.Frame):
         )
 
     def _on_done(self) -> None:
+        completion_ts = datetime.datetime.now()
         total = self._pass_count + self._fail_count
         self._append_result(
             f"── Done: {self._pass_count}/{total} passed ──", "header"
         )
         self._summary_var.set(f"{self._pass_count} / {total} passed")
+
+        # Append one summary row to the cumulative run log
+        if self._run_results:
+            try:
+                log_dir = self._config.effective_log_dir()
+                log_dir.mkdir(parents=True, exist_ok=True)
+                csv_path = log_dir / "test_suite_log.csv"
+                self._append_run_row(csv_path, completion_ts)
+                self._append_result(f"  CSV log → {csv_path}", "header")
+            except Exception as exc:
+                self._append_result(f"  CSV log failed: {exc}", "ERROR")
+
+        # Restart the same run if loop mode is active and Stop was not pressed
+        if self._loop_var.get() and not self._stop_requested:
+            self._start_run(self._current_run_tests)
+            return
+
         self._run_sel_btn.config(state="normal")
         self._run_all_btn.config(state="normal")
         self._stop_btn.config(state="disabled")
+
+    def _append_run_row(self, path, ts: datetime.datetime) -> None:
+        """Append one row to the cumulative CSV log.
+
+        Columns: Timestamp, <test1_name>, <test2_name>, …
+        A cell is blank when the test was not part of this run.
+        """
+        headers = ["Timestamp"] + [tc.name for tc in self._tests]
+        result_lookup = {r.test.id: r.status for r in self._run_results}
+
+        row = [ts.strftime("%Y-%m-%dT%H:%M:%S")]
+        for tc in self._tests:
+            row.append(result_lookup.get(tc.id, ""))
+
+        file_is_new = not path.exists() or path.stat().st_size == 0
+        with open(path, "a", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            if file_is_new:
+                writer.writerow(headers)
+            writer.writerow(row)
 
     def _append_result(self, text: str, tag: str = "") -> None:
         self._results.config(state="normal")
@@ -466,11 +571,62 @@ class TestSuitePanel(ttk.Frame):
         self._results.config(state="disabled")
         self._results.see("end")
 
+    # ------------------------------------------------------------------ #
+    #  CSV export
+    # ------------------------------------------------------------------ #
+
+    _CSV_HEADERS = [
+        "Timestamp", "Name", "Command", "Expected", "Terminator",
+        "Timeout_ms", "Status", "Duration_ms", "Actual_Response",
+    ]
+
+    def _write_csv(self, path) -> None:
+        with open(path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(self._CSV_HEADERS)
+            for i, r in enumerate(self._run_results):
+                ts = (self._run_timestamps[i]
+                      if i < len(self._run_timestamps)
+                      else datetime.datetime.now())
+                writer.writerow([
+                    ts.strftime("%Y-%m-%dT%H:%M:%S"),
+                    r.test.name,
+                    r.test.command,
+                    r.test.expected,
+                    r.test.terminator,
+                    r.test.timeout_ms,
+                    r.status,
+                    f"{r.duration_ms:.1f}",
+                    r.actual.replace("\n", " | "),
+                ])
+
+    def _export_csv(self) -> None:
+        if not self._run_results:
+            messagebox.showinfo("Export CSV", "No results to export.")
+            return
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            initialfile=f"test_results_{ts}.csv",
+            title="Export test results",
+        )
+        if not path:
+            return
+        try:
+            self._write_csv(path)
+        except OSError as exc:
+            messagebox.showerror("Export Failed", str(exc))
+
     def _clear_results(self) -> None:
         self._results.config(state="normal")
         self._results.delete("1.0", "end")
         self._results.config(state="disabled")
         self._summary_var.set("No results yet")
+        self._result_map.clear()
+        for iid in self._tree.get_children():
+            self._tree.set(iid, "result", "")
+            self._tree.item(iid, tags=())
 
     # ------------------------------------------------------------------ #
     #  Persistence

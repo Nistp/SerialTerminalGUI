@@ -7,9 +7,9 @@ from typing import Optional
 
 
 class Direction(Enum):
-    TX = "TX"
-    RX = "RX"
-    INFO = "INFO"
+    TX    = "TX"
+    RX    = "RX"
+    INFO  = "INFO"
     ERROR = "ERROR"
 
 

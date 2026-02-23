@@ -7,6 +7,18 @@ from typing import Callable, List, Optional
 
 from app.serial_handler import Direction, SerialHandler, TerminalMessage
 
+# Tokens that can appear literally in navigation command strings and will be
+# expanded to the corresponding control characters before sending.
+_ESCAPE_SEQUENCES: dict = {
+    "<ESC>": "\x1b",
+}
+
+
+def _expand_escapes(cmd: str) -> str:
+    for token, replacement in _ESCAPE_SEQUENCES.items():
+        cmd = cmd.replace(token, replacement)
+    return cmd
+
 
 @dataclass
 class TestCase:
@@ -132,7 +144,7 @@ class TestRunner:
         handler.start_capture()
         cq = handler.get_capture_queue()
         try:
-            handler.send(cmd, line_ending)
+            handler.send(_expand_escapes(cmd), line_ending)
         except Exception:
             handler.stop_capture()
             return
