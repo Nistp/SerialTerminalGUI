@@ -1,5 +1,6 @@
+import pathlib
 import tkinter as tk
-from tkinter import ttk
+from tkinter import filedialog, ttk
 from typing import Callable, Optional
 
 from app.config import BAUD_RATES, LINE_ENDINGS, PARITIES, STOPBITS, AppConfig
@@ -20,6 +21,8 @@ class ConnectionPanel(ttk.LabelFrame):
         self._databits_var = tk.StringVar(value=str(config.get("databits", 8)))
         self._stopbits_var = tk.StringVar()
         self._line_ending_var = tk.StringVar(value=config.get("line_ending", "CRLF"))
+
+        self._log_dir_var = tk.StringVar(value=config.get("log_dir", ""))
 
         self._connected = False
         self._port_map: dict = {}  # display string → device name
@@ -90,11 +93,32 @@ class ConnectionPanel(ttk.LabelFrame):
         )
         self._le_cb.grid(row=1, column=8, sticky="w", **pad)
 
+        # Row 2: Log / CSV folder
+        ttk.Label(self, text="Log folder:").grid(row=2, column=0, sticky="e", **pad)
+        self._log_dir_entry = ttk.Entry(self, textvariable=self._log_dir_var)
+        self._log_dir_entry.grid(row=2, column=1, columnspan=8, sticky="ew", **pad)
+        self._log_dir_entry.bind("<FocusOut>", self._on_log_dir_change)
+        self._log_dir_entry.bind("<Return>", self._on_log_dir_change)
+        ttk.Button(self, text="Browse…", command=self._browse_log_dir).grid(
+            row=2, column=9, sticky="w", **pad
+        )
+
         # Connect button (far right, spanning both rows)
         self._connect_btn = ttk.Button(
             self, text="Connect", command=self._on_connect_click, width=12
         )
         self._connect_btn.grid(row=0, column=9, rowspan=2, padx=8, pady=4, sticky="ns")
+
+    def _browse_log_dir(self) -> None:
+        current = self._log_dir_var.get().strip() or str(pathlib.Path.home() / "serial_logs")
+        chosen = filedialog.askdirectory(initialdir=current, title="Select log / CSV folder")
+        if chosen:
+            self._log_dir_var.set(chosen)
+            self._on_log_dir_change()
+
+    def _on_log_dir_change(self, *_) -> None:
+        self._config["log_dir"] = self._log_dir_var.get().strip()
+        self._config.save()
 
     def _restore_from_config(self) -> None:
         from app.config import PARITIES_INV, STOPBITS_INV

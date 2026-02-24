@@ -493,6 +493,7 @@ class TestSuitePanel(ttk.Frame):
         self._total_count = len(tests)
         self._run_results = []
         self._run_timestamps = []
+        self._run_start_ts = datetime.datetime.now()
 
         # Reset the result column for tests that are about to run
         for tc in tests:
@@ -504,6 +505,18 @@ class TestSuitePanel(ttk.Frame):
         self._append_result(
             f"── Running {len(tests)} test(s) ──", "header"
         )
+
+        # Create a new CSV only on a fresh start; loop continuations reuse the same file
+        if self._current_csv_path is None:
+            try:
+                log_dir = self._config.effective_log_dir()
+                log_dir.mkdir(parents=True, exist_ok=True)
+                ts_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                self._current_csv_path = log_dir / f"test_run_{ts_str}.csv"
+                self._append_result(f"  CSV → {self._current_csv_path}", "header")
+            except Exception as exc:
+                self._current_csv_path = None
+                self._append_result(f"  CSV setup failed: {exc}", "ERROR")
 
         self._run_sel_btn.config(state="disabled")
         self._run_all_btn.config(state="disabled")
@@ -553,8 +566,9 @@ class TestSuitePanel(ttk.Frame):
         )
         self._append_result(line, status)
 
+        now = datetime.datetime.now()
         self._run_results.append(result)
-        self._run_timestamps.append(datetime.datetime.now())
+        self._run_timestamps.append(now)
 
         if status == "PASS":
             self._pass_count += 1
@@ -586,11 +600,20 @@ class TestSuitePanel(ttk.Frame):
             except Exception as exc:
                 self._append_result(f"  CSV log failed: {exc}", "ERROR")
 
+        # Write one wide-format row to the per-run CSV
+        if self._current_csv_path and self._run_start_ts and self._run_results:
+            try:
+                self._write_run_row(self._current_csv_path, self._run_start_ts, completion_ts)
+            except Exception as exc:
+                self._append_result(f"  CSV write failed: {exc}", "ERROR")
+
         # Restart the same run if loop mode is active and Stop was not pressed
         if self._loop_var.get() and not self._stop_requested:
             self._start_run(self._current_run_tests)
             return
 
+        # Run has ended — next Start should open a fresh CSV
+        self._current_csv_path = None
         self._run_sel_btn.config(state="normal")
         self._run_all_btn.config(state="normal")
         self._stop_btn.config(state="disabled")
@@ -607,6 +630,39 @@ class TestSuitePanel(ttk.Frame):
         row = [ts.strftime("%Y-%m-%dT%H:%M:%S")]
         for tc in self._tests:
             row.append(result_lookup.get(tc.id, ""))
+
+        file_is_new = not path.exists() or path.stat().st_size == 0
+        with open(path, "a", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            if file_is_new:
+                writer.writerow(headers)
+            writer.writerow(row)
+
+    def _write_run_row(self, path, run_start: datetime.datetime, run_end: datetime.datetime) -> None:
+        """Append one wide-format row per run/loop iteration.
+
+        Columns: Run_Start, Run_End, <cmd>_Status, <cmd>_Actual, …
+        Tests that were not part of this run (e.g. Run Selected) get blank cells.
+        """
+        headers = ["Run_Start", "Run_End"]
+        for tc in self._tests:
+            headers += [f"{tc.name}_Status", f"{tc.name}_Actual"]
+
+        result_lookup = {
+            r.test.id: (r.status, r.actual.replace("\n", " | "))
+            for r in self._run_results
+        }
+
+        row: list = [
+            run_start.strftime("%Y-%m-%dT%H:%M:%S"),
+            run_end.strftime("%Y-%m-%dT%H:%M:%S"),
+        ]
+        for tc in self._tests:
+            if tc.id in result_lookup:
+                status, actual = result_lookup[tc.id]
+                row += [status, actual]
+            else:
+                row += ["", ""]
 
         file_is_new = not path.exists() or path.stat().st_size == 0
         with open(path, "a", newline="", encoding="utf-8") as fh:
