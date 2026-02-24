@@ -1,9 +1,10 @@
 import queue
+import re
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 from app.serial_handler import Direction, SerialHandler, TerminalMessage
 
@@ -20,6 +21,96 @@ def _expand_escapes(cmd: str) -> str:
     return cmd
 
 
+# Matches lines of the form:  <optional prefix>  <op>  <threshold>
+# Supported ops: >= <= > < == != in
+_CHECK_RE = re.compile(r'^(.*?)\s*(>=|<=|!=|==|>|<|in)\s+(.+)$')
+# Extracts the first integer or float (with optional sign and exponent)
+_NUMBER_RE = re.compile(r'[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?')
+
+
+def _evaluate_numeric_checks(checks_str: str, actual: str) -> Tuple[bool, List[str]]:
+    """Evaluate newline-separated numeric assertions against *actual*.
+
+    Each non-empty line must follow one of these formats::
+
+        <prefix> <op> <value>       # e.g.  +CSQ: >= 5
+        <prefix> in <lo>..<hi>      # e.g.  TEMP: in 15.0..35.0
+
+    *prefix* (may be empty) is searched literally in *actual*; the first
+    number found after it is extracted and compared.  If prefix is empty the
+    first number anywhere in the response is used.
+
+    Returns ``(all_passed, failure_messages)``.
+    """
+    if not checks_str.strip():
+        return True, []
+
+    failures: List[str] = []
+    for raw in checks_str.split("\n"):
+        line = raw.strip()
+        if not line:
+            continue
+
+        m = _CHECK_RE.match(line)
+        if not m:
+            failures.append(f"Bad syntax: {line!r}")
+            continue
+
+        prefix = m.group(1).strip()
+        op     = m.group(2)
+        rhs    = m.group(3).strip()
+
+        # Locate search region
+        search_in = actual
+        if prefix:
+            idx = actual.find(prefix)
+            if idx == -1:
+                failures.append(f"Prefix not found: {prefix!r}")
+                continue
+            search_in = actual[idx + len(prefix):]
+
+        num_m = _NUMBER_RE.search(search_in)
+        if not num_m:
+            loc = f"after {prefix!r}" if prefix else "in response"
+            failures.append(f"No number {loc}")
+            continue
+
+        value = float(num_m.group())
+
+        if op == "in":
+            parts = rhs.split("..")
+            if len(parts) != 2:
+                failures.append(f"Bad range (expected lo..hi): {rhs!r}")
+                continue
+            try:
+                lo, hi = float(parts[0].strip()), float(parts[1].strip())
+            except ValueError:
+                failures.append(f"Non-numeric range bounds: {rhs!r}")
+                continue
+            if not (lo <= value <= hi):
+                loc = f" (after {prefix!r})" if prefix else ""
+                failures.append(f"{value} not in [{lo}..{hi}]{loc}")
+        else:
+            try:
+                threshold = float(rhs)
+            except ValueError:
+                failures.append(f"Non-numeric threshold: {rhs!r}")
+                continue
+            result = {
+                ">=": value >= threshold,
+                "<=": value <= threshold,
+                ">":  value > threshold,
+                "<":  value < threshold,
+                "==": value == threshold,
+                "!=": value != threshold,
+            }[op]
+            if not result:
+                loc = f" (after {prefix!r})" if prefix else ""
+                failures.append(f"{value} {op} {threshold} failed{loc}")
+
+    return len(failures) == 0, failures
+
+
 @dataclass
 class TestCase:
     name: str
@@ -34,6 +125,8 @@ class TestCase:
     teardown_commands: List[str] = field(default_factory=list)
     # Timeout for each individual navigation command (setup/teardown step).
     nav_timeout_ms: int = 1000
+    # Newline-separated numeric assertions: "<prefix> <op> <value>"
+    numeric_checks: str = ""
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
     def to_dict(self) -> dict:
@@ -48,6 +141,7 @@ class TestCase:
             "setup_commands": self.setup_commands,
             "teardown_commands": self.teardown_commands,
             "nav_timeout_ms": self.nav_timeout_ms,
+            "numeric_checks": self.numeric_checks,
         }
 
     @classmethod
@@ -63,6 +157,7 @@ class TestCase:
             setup_commands=d.get("setup_commands", []),
             teardown_commands=d.get("teardown_commands", []),
             nav_timeout_ms=int(d.get("nav_timeout_ms", 1000)),
+            numeric_checks=d.get("numeric_checks", ""),
         )
 
 
@@ -237,10 +332,23 @@ class TestRunner:
 
         if not terminator_found and test.terminator:
             status = "TIMEOUT"
-        elif test.expected and test.expected not in actual:
-            status = "FAIL"
         else:
-            status = "PASS"
+            # Substring pattern check
+            if test.expected:
+                patterns = [p.strip() for p in test.expected.split("\n") if p.strip()]
+                sub_ok = all(p in actual for p in patterns)
+            else:
+                sub_ok = True
+
+            # Numeric limit check
+            if test.numeric_checks:
+                num_ok, num_failures = _evaluate_numeric_checks(test.numeric_checks, actual)
+                if not num_ok:
+                    actual = actual + "\n[numeric checks]\n" + "\n".join(num_failures)
+            else:
+                num_ok = True
+
+            status = "PASS" if (sub_ok and num_ok) else "FAIL"
 
         # --- Silent teardown (return to parent menu) ---
         for cmd in test.teardown_commands:
