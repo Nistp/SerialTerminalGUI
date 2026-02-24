@@ -26,7 +26,7 @@ _HEADINGS = {
     "nav":         "⚙",   # indicates setup/teardown navigation steps present
     "name":        "Name",
     "command":     "Command",
-    "expected":    "Expected (contains)",
+    "expected":    "Expected",
     "terminator":  "Terminator",
     "timeout_ms":  "Timeout (ms)",
 }
@@ -197,7 +197,7 @@ class TestSuitePanel(ttk.Frame):
                     "⚙" if has_nav else "",
                     tc.name,
                     tc.command,
-                    tc.expected,
+                    tc.expected.replace("\n", " ∧ "),
                     tc.terminator,
                     tc.timeout_ms,
                     result_label,
@@ -284,12 +284,11 @@ class TestSuitePanel(ttk.Frame):
 
         # --- Single-line fields ---
         single_fields = [
-            ("Name:",                tc.name        if tc else "",    "name"),
-            ("Command:",             tc.command     if tc else "",    "command"),
-            ("Expected (contains):", tc.expected    if tc else "",    "expected"),
-            ("Terminator:",          tc.terminator  if tc else "OK",  "terminator"),
-            ("Timeout (ms):",        str(tc.timeout_ms)  if tc else "2000", "timeout_ms"),
-            ("Nav timeout (ms):",    str(tc.nav_timeout_ms) if tc else "1000", "nav_timeout_ms"),
+            ("Name:",             tc.name        if tc else "",    "name"),
+            ("Command:",          tc.command     if tc else "",    "command"),
+            ("Terminator:",       tc.terminator  if tc else "OK",  "terminator"),
+            ("Timeout (ms):",     str(tc.timeout_ms)  if tc else "2000", "timeout_ms"),
+            ("Nav timeout (ms):", str(tc.nav_timeout_ms) if tc else "1000", "nav_timeout_ms"),
         ]
 
         vars_: dict = {}
@@ -301,7 +300,55 @@ class TestSuitePanel(ttk.Frame):
                 row=row, column=1, sticky="ew", **pad
             )
 
-        sep_row = len(single_fields)
+        # --- Multiline: expected patterns ---
+        exp_row = len(single_fields)
+        ttk.Label(
+            dialog,
+            text="Expected\n(one per line, all must match):",
+            justify="right",
+        ).grid(row=exp_row, column=0, sticky="ne", **pad)
+
+        exp_frame = ttk.Frame(dialog)
+        exp_frame.grid(row=exp_row, column=1, sticky="nsew", **pad)
+        exp_frame.columnconfigure(0, weight=1)
+        exp_frame.rowconfigure(0, weight=1)
+        dialog.rowconfigure(exp_row, weight=1)
+
+        self._expected_text = tk.Text(exp_frame, height=3, width=40, wrap="none",
+                                      font=("Courier", 9))
+        exp_vsb = ttk.Scrollbar(exp_frame, orient="vertical",
+                                command=self._expected_text.yview)
+        self._expected_text.configure(yscrollcommand=exp_vsb.set)
+        self._expected_text.grid(row=0, column=0, sticky="nsew")
+        exp_vsb.grid(row=0, column=1, sticky="ns")
+        if tc and tc.expected:
+            self._expected_text.insert("1.0", tc.expected)
+
+        # --- Numeric checks ---
+        num_row = exp_row + 1
+        ttk.Label(
+            dialog,
+            text="Numeric checks\n(prefix op val  /  prefix in lo..hi):",
+            justify="right",
+        ).grid(row=num_row, column=0, sticky="ne", **pad)
+
+        num_frame = ttk.Frame(dialog)
+        num_frame.grid(row=num_row, column=1, sticky="nsew", **pad)
+        num_frame.columnconfigure(0, weight=1)
+        num_frame.rowconfigure(0, weight=1)
+        dialog.rowconfigure(num_row, weight=1)
+
+        self._numeric_text = tk.Text(num_frame, height=3, width=40, wrap="none",
+                                     font=("Courier", 9))
+        num_vsb = ttk.Scrollbar(num_frame, orient="vertical",
+                                command=self._numeric_text.yview)
+        self._numeric_text.configure(yscrollcommand=num_vsb.set)
+        self._numeric_text.grid(row=0, column=0, sticky="nsew")
+        num_vsb.grid(row=0, column=1, sticky="ns")
+        if tc and tc.numeric_checks:
+            self._numeric_text.insert("1.0", tc.numeric_checks)
+
+        sep_row = num_row + 1
         ttk.Separator(dialog, orient="horizontal").grid(
             row=sep_row, column=0, columnspan=2, sticky="ew", pady=6, padx=4
         )
@@ -373,28 +420,31 @@ class TestSuitePanel(ttk.Frame):
                 messagebox.showwarning("Validation", "Timeouts must be integers.", parent=dialog)
                 return
 
-            setup_cmds = _read_cmd_lines(self._setup_text)
-            td_cmds    = _read_cmd_lines(self._td_text)
+            setup_cmds     = _read_cmd_lines(self._setup_text)
+            td_cmds        = _read_cmd_lines(self._td_text)
+            numeric_checks = self._numeric_text.get("1.0", "end-1c").strip()
 
             if tc is not None:
                 tc.name              = name
                 tc.command           = vars_["command"].get().strip()
-                tc.expected          = vars_["expected"].get().strip()
+                tc.expected          = self._expected_text.get("1.0", "end-1c").strip()
                 tc.terminator        = vars_["terminator"].get().strip()
                 tc.timeout_ms        = timeout
                 tc.nav_timeout_ms    = nav_timeout
                 tc.setup_commands    = setup_cmds
                 tc.teardown_commands = td_cmds
+                tc.numeric_checks    = numeric_checks
             else:
                 new_tc = TestCase(
                     name=name,
                     command=vars_["command"].get().strip(),
-                    expected=vars_["expected"].get().strip(),
+                    expected=self._expected_text.get("1.0", "end-1c").strip(),
                     terminator=vars_["terminator"].get().strip(),
                     timeout_ms=timeout,
                     nav_timeout_ms=nav_timeout,
                     setup_commands=setup_cmds,
                     teardown_commands=td_cmds,
+                    numeric_checks=numeric_checks,
                 )
                 self._tests.append(new_tc)
 
