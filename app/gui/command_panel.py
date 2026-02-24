@@ -36,10 +36,24 @@ class CommandPanel(ttk.Frame):
         self._send_btn = ttk.Button(self, text="Send", command=self._send_command, width=8)
         self._send_btn.grid(row=0, column=2, padx=(2, 4), pady=4)
 
+        ttk.Separator(self, orient="vertical").grid(row=0, column=3, sticky="ns", padx=4)
+
+        _special = [("ESC", "\x1b"), ("TAB", "\t"), ("^C", "\x03")]
+        self._special_btns = []
+        for col, (label, char) in enumerate(_special, start=4):
+            btn = ttk.Button(self, text=label, width=4,
+                             command=lambda c=char: self._send_special(c))
+            btn.grid(row=0, column=col, padx=2, pady=4)
+            self._special_btns.append(btn)
+
         self.set_enabled(False)
 
     def set_line_ending_provider(self, provider: Callable[[], bytes]) -> None:
         self._line_ending_provider = provider
+
+    def _send_special(self, char: str) -> None:
+        if self.on_send and self._line_ending_provider:
+            self.on_send(char, b"")
 
     def _send_command(self) -> None:
         text = self._entry_var.get()
@@ -80,5 +94,7 @@ class CommandPanel(ttk.Frame):
         state = "normal" if enabled else "disabled"
         self._entry.config(state=state)
         self._send_btn.config(state=state)
+        for btn in self._special_btns:
+            btn.config(state=state)
         if enabled:
             self._entry.focus_set()
