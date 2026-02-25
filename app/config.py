@@ -31,6 +31,8 @@ DEFAULTS: dict = {
     "max_lines": 5000,
     "test_delay_ms": 200,
     "tests": [],
+    "trigger_port": "",
+    "trigger_baud": 9600,
 }
 
 

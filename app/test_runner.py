@@ -127,6 +127,10 @@ class TestCase:
     nav_timeout_ms: int = 1000
     # Newline-separated numeric assertions: "<prefix> <op> <value>"
     numeric_checks: str = ""
+    # Commands sent fire-and-forget to the secondary trigger port.
+    trigger_commands: List[str] = field(default_factory=list)
+    # When to fire: "before_setup" (default) or "after_setup"
+    trigger_timing: str = "before_setup"
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
     def to_dict(self) -> dict:
@@ -142,6 +146,8 @@ class TestCase:
             "teardown_commands": self.teardown_commands,
             "nav_timeout_ms": self.nav_timeout_ms,
             "numeric_checks": self.numeric_checks,
+            "trigger_commands": self.trigger_commands,
+            "trigger_timing": self.trigger_timing,
         }
 
     @classmethod
@@ -158,6 +164,8 @@ class TestCase:
             teardown_commands=d.get("teardown_commands", []),
             nav_timeout_ms=int(d.get("nav_timeout_ms", 1000)),
             numeric_checks=d.get("numeric_checks", ""),
+            trigger_commands=d.get("trigger_commands", []),
+            trigger_timing=d.get("trigger_timing", "before_setup"),
         )
 
 
@@ -186,11 +194,12 @@ class TestRunner:
         on_result: Callable[[TestResult], None],
         on_done: Callable[[], None],
         delay_ms: int = 200,
+        trigger_handler: Optional[SerialHandler] = None,
     ) -> None:
         self._stop_event.clear()
         self._thread = threading.Thread(
             target=self._run_loop,
-            args=(tests, handler, line_ending, on_result, on_done, delay_ms),
+            args=(tests, handler, line_ending, on_result, on_done, delay_ms, trigger_handler),
             daemon=True,
             name="test-runner",
         )
@@ -207,12 +216,13 @@ class TestRunner:
         on_result: Callable[[TestResult], None],
         on_done: Callable[[], None],
         delay_ms: int,
+        trigger_handler: Optional[SerialHandler] = None,
     ) -> None:
         for test in tests:
             if self._stop_event.is_set():
                 break
 
-            result = self._execute_test(test, handler, line_ending)
+            result = self._execute_test(test, handler, line_ending, trigger_handler)
             on_result(result)
 
             if self._stop_event.is_set():
@@ -222,6 +232,29 @@ class TestRunner:
                 time.sleep(delay_ms / 1000.0)
 
         on_done()
+
+    def _execute_trigger(
+        self,
+        cmd: str,
+        trigger_handler: SerialHandler,
+        line_ending: bytes,
+    ) -> None:
+        """Fire-and-forget send to the secondary trigger port."""
+        try:
+            trigger_handler.send(_expand_escapes(cmd), line_ending)
+        except Exception:
+            pass
+
+    def _run_trigger_commands(
+        self,
+        test: "TestCase",
+        trigger_handler: Optional[SerialHandler],
+        line_ending: bytes,
+    ) -> None:
+        if trigger_handler is not None and trigger_handler.is_connected:
+            for cmd in test.trigger_commands:
+                if cmd.strip():
+                    self._execute_trigger(cmd.strip(), trigger_handler, line_ending)
 
     def _execute_silent(
         self,
@@ -264,6 +297,7 @@ class TestRunner:
         test: TestCase,
         handler: SerialHandler,
         line_ending: bytes,
+        trigger_handler: Optional[SerialHandler] = None,
     ) -> TestResult:
         if not handler.is_connected:
             return TestResult(
@@ -273,6 +307,10 @@ class TestRunner:
                 duration_ms=0.0,
             )
 
+        # --- Trigger commands (before setup, if configured) ---
+        if test.trigger_timing == "before_setup":
+            self._run_trigger_commands(test, trigger_handler, line_ending)
+
         # --- Silent setup (menu navigation) ---
         for cmd in test.setup_commands:
             if cmd.strip():
@@ -280,6 +318,10 @@ class TestRunner:
                     cmd.strip(), handler, line_ending,
                     test.terminator, test.nav_timeout_ms,
                 )
+
+        # --- Trigger commands (after setup, if configured) ---
+        if test.trigger_timing == "after_setup":
+            self._run_trigger_commands(test, trigger_handler, line_ending)
 
         # --- Visible test command ---
         handler.start_capture()

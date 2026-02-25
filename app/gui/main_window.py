@@ -208,6 +208,7 @@ class MainWindow:
     # ------------------------------------------------------------------ #
 
     def _on_closing(self) -> None:
+        self._test_panel.cleanup()
         if self._handler.is_connected:
             self._handler.disconnect()
         self._logger.close_session()
