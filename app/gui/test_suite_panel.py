@@ -85,12 +85,51 @@ class TestSuitePanel(ttk.Frame):
 
     def _setup_ui(self) -> None:
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(1, weight=2)
-        self.rowconfigure(3, weight=1)
+        self.rowconfigure(2, weight=2)
+        self.rowconfigure(4, weight=1)
+
+        # --- Trigger Device ---
+        from app.serial_handler import list_serial_ports
+        from app.config import BAUD_RATES
+
+        trigger_frame = ttk.LabelFrame(self, text="Trigger Device")
+        trigger_frame.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 0))
+
+        self._trigger_port_var = tk.StringVar()
+        self._trigger_baud_var = tk.StringVar(value=str(self._config.get("trigger_baud", 9600)))
+        self._trigger_connected = False
+        self._trigger_port_map: dict = {}
+        self._trigger_handler = SerialHandler()
+
+        ttk.Label(trigger_frame, text="Port:").pack(side="left", padx=(4, 2))
+        self._trigger_port_combo = ttk.Combobox(
+            trigger_frame, textvariable=self._trigger_port_var, width=14, state="readonly"
+        )
+        self._trigger_port_combo.pack(side="left", padx=2)
+
+        ttk.Button(trigger_frame, text="⟳", width=2,
+                   command=self._refresh_trigger_ports).pack(side="left", padx=2)
+
+        ttk.Label(trigger_frame, text="Baud:").pack(side="left", padx=(8, 2))
+        self._trigger_baud_combo = ttk.Combobox(
+            trigger_frame,
+            textvariable=self._trigger_baud_var,
+            values=[str(b) for b in BAUD_RATES],
+            width=9,
+            state="readonly",
+        )
+        self._trigger_baud_combo.pack(side="left", padx=2)
+
+        self._trigger_connect_btn = ttk.Button(
+            trigger_frame, text="Connect Trigger", command=self._on_trigger_connect_click
+        )
+        self._trigger_connect_btn.pack(side="left", padx=(8, 4))
+
+        self._refresh_trigger_ports()
 
         # --- Toolbar ---
         toolbar = ttk.Frame(self)
-        toolbar.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 0))
+        toolbar.grid(row=1, column=0, sticky="ew", padx=4, pady=(4, 0))
 
         ttk.Button(toolbar, text="+ Add",   command=self._add_test).pack(side="left", padx=2)
         ttk.Button(toolbar, text="Edit",    command=self._edit_test).pack(side="left", padx=2)
@@ -100,7 +139,7 @@ class TestSuitePanel(ttk.Frame):
 
         # --- Treeview ---
         tree_frame = ttk.Frame(self)
-        tree_frame.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
+        tree_frame.grid(row=2, column=0, sticky="nsew", padx=4, pady=4)
         tree_frame.columnconfigure(0, weight=1)
         tree_frame.rowconfigure(0, weight=1)
 
@@ -127,7 +166,7 @@ class TestSuitePanel(ttk.Frame):
 
         # --- Run bar ---
         run_bar = ttk.Frame(self)
-        run_bar.grid(row=2, column=0, sticky="ew", padx=4, pady=2)
+        run_bar.grid(row=3, column=0, sticky="ew", padx=4, pady=2)
 
         self._run_sel_btn = ttk.Button(
             run_bar, text="▶ Run Selected", command=self._run_selected
@@ -163,14 +202,14 @@ class TestSuitePanel(ttk.Frame):
             height=8,
             relief="flat",
         )
-        self._results.grid(row=3, column=0, sticky="nsew", padx=4, pady=(0, 2))
+        self._results.grid(row=4, column=0, sticky="nsew", padx=4, pady=(0, 2))
         for status, colors in _RESULT_TAGS.items():
             self._results.tag_configure(status, **colors, font=("Courier", 9, "bold"))
         self._results.tag_configure("header", foreground="#AAAAAA")
 
         # --- Summary bar ---
         summary_bar = ttk.Frame(self)
-        summary_bar.grid(row=4, column=0, sticky="ew", padx=4, pady=(0, 4))
+        summary_bar.grid(row=5, column=0, sticky="ew", padx=4, pady=(0, 4))
 
         self._summary_var = tk.StringVar(value="No results yet")
         ttk.Label(summary_bar, textvariable=self._summary_var).pack(side="left")
@@ -180,13 +219,78 @@ class TestSuitePanel(ttk.Frame):
         self.set_enabled(False)
 
     # ------------------------------------------------------------------ #
+    #  Trigger device helpers
+    # ------------------------------------------------------------------ #
+
+    def _refresh_trigger_ports(self) -> None:
+        from app.serial_handler import list_serial_ports
+        ports = list_serial_ports()
+        self._trigger_port_map = {desc: dev for dev, desc in ports}
+        display_names = [desc for _, desc in ports]
+        self._trigger_port_combo["values"] = display_names
+
+        saved = self._config.get("trigger_port", "")
+        # Try to select a display name whose device matches the saved port
+        for dev, desc in ports:
+            if dev == saved:
+                self._trigger_port_var.set(desc)
+                return
+        if display_names:
+            self._trigger_port_var.set(display_names[0])
+
+    def _on_trigger_connect_click(self) -> None:
+        if self._trigger_connected:
+            self._trigger_handler.disconnect()
+            self._set_trigger_connected(False)
+            return
+
+        desc = self._trigger_port_var.get()
+        port = self._trigger_port_map.get(desc, desc)
+        if not port:
+            messagebox.showwarning("Trigger Device", "Select a port first.")
+            return
+        try:
+            baud = int(self._trigger_baud_var.get())
+        except ValueError:
+            baud = 9600
+
+        try:
+            self._trigger_handler.connect(
+                port=port, baud=baud, parity="N", databits=8, stopbits=1
+            )
+        except Exception as exc:
+            messagebox.showerror("Trigger Device", f"Connection failed: {exc}")
+            return
+
+        self._config["trigger_port"] = port
+        self._config["trigger_baud"] = baud
+        self._config.save()
+        self._set_trigger_connected(True)
+
+    def _set_trigger_connected(self, connected: bool) -> None:
+        self._trigger_connected = connected
+        if connected:
+            self._trigger_connect_btn.config(text="Disconnect Trigger")
+            self._trigger_port_combo.config(state="disabled")
+            self._trigger_baud_combo.config(state="disabled")
+        else:
+            self._trigger_connect_btn.config(text="Connect Trigger")
+            self._trigger_port_combo.config(state="readonly")
+            self._trigger_baud_combo.config(state="readonly")
+
+    def cleanup(self) -> None:
+        """Disconnect the trigger handler on window close."""
+        if self._trigger_handler.is_connected:
+            self._trigger_handler.disconnect()
+
+    # ------------------------------------------------------------------ #
     #  Treeview helpers
     # ------------------------------------------------------------------ #
 
     def _populate_tree(self) -> None:
         self._tree.delete(*self._tree.get_children())
         for tc in self._tests:
-            has_nav = bool(tc.setup_commands or tc.teardown_commands)
+            has_nav = bool(tc.setup_commands or tc.teardown_commands or tc.trigger_commands)
             result_entry = self._result_map.get(tc.id)  # (label, status) or None
             result_label = result_entry[0] if result_entry else ""
             result_tag   = result_entry[1] if result_entry else ""
@@ -353,8 +457,48 @@ class TestSuitePanel(ttk.Frame):
             row=sep_row, column=0, columnspan=2, sticky="ew", pady=6, padx=4
         )
 
+        # --- Trigger commands ---
+        trig_row = sep_row + 1
+        ttk.Label(
+            dialog,
+            text="Trigger commands\n(sent to trigger port):",
+            justify="right",
+        ).grid(row=trig_row, column=0, sticky="ne", **pad)
+
+        trig_frame = ttk.Frame(dialog)
+        trig_frame.grid(row=trig_row, column=1, sticky="nsew", **pad)
+        trig_frame.columnconfigure(0, weight=1)
+        trig_frame.rowconfigure(0, weight=1)
+        dialog.rowconfigure(trig_row, weight=1)
+
+        self._trigger_text = tk.Text(trig_frame, height=3, width=40, wrap="none",
+                                     font=("Courier", 9))
+        trig_vsb = ttk.Scrollbar(trig_frame, orient="vertical",
+                                 command=self._trigger_text.yview)
+        self._trigger_text.configure(yscrollcommand=trig_vsb.set)
+        self._trigger_text.grid(row=0, column=0, sticky="nsew")
+        trig_vsb.grid(row=0, column=1, sticky="ns")
+        if tc and tc.trigger_commands:
+            self._trigger_text.insert("1.0", "\n".join(tc.trigger_commands))
+
+        # --- Trigger timing ---
+        timing_row = trig_row + 1
+        ttk.Label(dialog, text="Trigger timing:").grid(
+            row=timing_row, column=0, sticky="e", **pad
+        )
+        timing_default = tc.trigger_timing if tc else "before_setup"
+        timing_display = "After setup commands" if timing_default == "after_setup" else "Before setup commands"
+        self._trigger_timing_var = tk.StringVar(value=timing_display)
+        ttk.Combobox(
+            dialog,
+            textvariable=self._trigger_timing_var,
+            values=["Before setup commands", "After setup commands"],
+            state="readonly",
+            width=22,
+        ).grid(row=timing_row, column=1, sticky="w", **pad)
+
         # --- Multiline: setup commands ---
-        setup_row = sep_row + 1
+        setup_row = timing_row + 1
         ttk.Label(
             dialog,
             text="Setup commands\n(one per line, not logged):",
@@ -423,6 +567,12 @@ class TestSuitePanel(ttk.Frame):
             setup_cmds     = _read_cmd_lines(self._setup_text)
             td_cmds        = _read_cmd_lines(self._td_text)
             numeric_checks = self._numeric_text.get("1.0", "end-1c").strip()
+            trigger_cmds   = _read_cmd_lines(self._trigger_text)
+            trigger_timing = (
+                "after_setup"
+                if self._trigger_timing_var.get() == "After setup commands"
+                else "before_setup"
+            )
 
             if tc is not None:
                 tc.name              = name
@@ -434,6 +584,8 @@ class TestSuitePanel(ttk.Frame):
                 tc.setup_commands    = setup_cmds
                 tc.teardown_commands = td_cmds
                 tc.numeric_checks    = numeric_checks
+                tc.trigger_commands  = trigger_cmds
+                tc.trigger_timing    = trigger_timing
             else:
                 new_tc = TestCase(
                     name=name,
@@ -445,6 +597,8 @@ class TestSuitePanel(ttk.Frame):
                     setup_commands=setup_cmds,
                     teardown_commands=td_cmds,
                     numeric_checks=numeric_checks,
+                    trigger_commands=trigger_cmds,
+                    trigger_timing=trigger_timing,
                 )
                 self._tests.append(new_tc)
 
@@ -533,6 +687,7 @@ class TestSuitePanel(ttk.Frame):
         def _safe_on_done() -> None:
             self.after(0, self._on_done)
 
+        trigger_handler = self._trigger_handler if self._trigger_handler.is_connected else None
         self._runner.run(
             tests=tests,
             handler=handler,
@@ -540,6 +695,7 @@ class TestSuitePanel(ttk.Frame):
             on_result=_safe_on_result,
             on_done=_safe_on_done,
             delay_ms=delay_ms,
+            trigger_handler=trigger_handler,
         )
 
     def _stop_run(self) -> None:
