@@ -119,6 +119,9 @@ class TestCase:
     terminator: str = "OK"
     timeout_ms: int = 2000
     enabled: bool = True
+    # If True, the runner pauses and asks the user for the verdict instead of
+    # evaluating the response automatically.
+    manual: bool = False
     # Navigation commands executed silently before/after the test command.
     # They are NOT echoed to the terminal and NOT written to the session log.
     setup_commands: List[str] = field(default_factory=list)
@@ -142,6 +145,7 @@ class TestCase:
             "terminator": self.terminator,
             "timeout_ms": self.timeout_ms,
             "enabled": self.enabled,
+            "manual": self.manual,
             "setup_commands": self.setup_commands,
             "teardown_commands": self.teardown_commands,
             "nav_timeout_ms": self.nav_timeout_ms,
@@ -160,6 +164,7 @@ class TestCase:
             terminator=d.get("terminator", "OK"),
             timeout_ms=int(d.get("timeout_ms", 2000)),
             enabled=bool(d.get("enabled", True)),
+            manual=bool(d.get("manual", False)),
             setup_commands=d.get("setup_commands", []),
             teardown_commands=d.get("teardown_commands", []),
             nav_timeout_ms=int(d.get("nav_timeout_ms", 1000)),
@@ -181,6 +186,14 @@ class TestRunner:
     def __init__(self) -> None:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # Used to synchronise the runner thread with the GUI during manual tests.
+        self._manual_event = threading.Event()
+        self._manual_result: Optional[Tuple[str, str]] = None
+
+    def set_manual_result(self, status: str, actual: str) -> None:
+        """Called from the GUI thread after the user submits their verdict."""
+        self._manual_result = (status, actual)
+        self._manual_event.set()
 
     @property
     def is_running(self) -> bool:
@@ -195,11 +208,13 @@ class TestRunner:
         on_done: Callable[[], None],
         delay_ms: int = 200,
         trigger_handler: Optional[SerialHandler] = None,
+        on_manual_input: Optional[Callable[["TestCase"], None]] = None,
     ) -> None:
         self._stop_event.clear()
         self._thread = threading.Thread(
             target=self._run_loop,
-            args=(tests, handler, line_ending, on_result, on_done, delay_ms, trigger_handler),
+            args=(tests, handler, line_ending, on_result, on_done, delay_ms,
+                  trigger_handler, on_manual_input),
             daemon=True,
             name="test-runner",
         )
@@ -217,12 +232,13 @@ class TestRunner:
         on_done: Callable[[], None],
         delay_ms: int,
         trigger_handler: Optional[SerialHandler] = None,
+        on_manual_input: Optional[Callable[["TestCase"], None]] = None,
     ) -> None:
         for test in tests:
             if self._stop_event.is_set():
                 break
 
-            result = self._execute_test(test, handler, line_ending, trigger_handler)
+            result = self._execute_test(test, handler, line_ending, trigger_handler, on_manual_input)
             on_result(result)
 
             if self._stop_event.is_set():
@@ -292,12 +308,64 @@ class TestRunner:
 
         handler.stop_capture()
 
+    def _execute_manual(
+        self,
+        test: TestCase,
+        handler: SerialHandler,
+        line_ending: bytes,
+        on_manual_input: Optional[Callable[["TestCase"], None]],
+    ) -> TestResult:
+        """Send the command (if any), then block until the user provides a verdict."""
+        t_start = time.monotonic()
+
+        if test.command.strip():
+            try:
+                handler.rx_queue.put(TerminalMessage(Direction.TX, test.command))
+                handler.send(test.command, line_ending)
+            except Exception as exc:
+                for cmd in test.teardown_commands:
+                    if cmd.strip():
+                        self._execute_silent(cmd.strip(), handler, line_ending,
+                                             test.terminator, test.nav_timeout_ms)
+                return TestResult(test=test, status="ERROR",
+                                  actual=f"Send failed: {exc}",
+                                  duration_ms=(time.monotonic() - t_start) * 1000.0)
+
+        # Signal the GUI to show the verdict dialog.
+        self._manual_event.clear()
+        self._manual_result = None
+        if on_manual_input is not None:
+            on_manual_input(test)
+
+        # Block until the user submits, or the run is stopped.
+        while not self._manual_event.is_set():
+            if self._stop_event.is_set():
+                for cmd in test.teardown_commands:
+                    if cmd.strip():
+                        self._execute_silent(cmd.strip(), handler, line_ending,
+                                             test.terminator, test.nav_timeout_ms)
+                return TestResult(test=test, status="ERROR",
+                                  actual="Run stopped while waiting for manual verdict",
+                                  duration_ms=(time.monotonic() - t_start) * 1000.0)
+            time.sleep(0.05)
+
+        duration_ms = (time.monotonic() - t_start) * 1000.0
+        status, actual = self._manual_result or ("ERROR", "No result provided")
+
+        for cmd in test.teardown_commands:
+            if cmd.strip():
+                self._execute_silent(cmd.strip(), handler, line_ending,
+                                     test.terminator, test.nav_timeout_ms)
+
+        return TestResult(test=test, status=status, actual=actual, duration_ms=duration_ms)
+
     def _execute_test(
         self,
         test: TestCase,
         handler: SerialHandler,
         line_ending: bytes,
         trigger_handler: Optional[SerialHandler] = None,
+        on_manual_input: Optional[Callable[["TestCase"], None]] = None,
     ) -> TestResult:
         if not handler.is_connected:
             return TestResult(
@@ -323,7 +391,11 @@ class TestRunner:
         if test.trigger_timing == "after_setup":
             self._run_trigger_commands(test, trigger_handler, line_ending)
 
-        # --- Visible test command ---
+        # --- Manual test: pause and wait for user verdict ---
+        if test.manual:
+            return self._execute_manual(test, handler, line_ending, on_manual_input)
+
+        # --- Visible test command (automated) ---
         handler.start_capture()
         cq = handler.get_capture_queue()
         collected_lines: List[str] = []

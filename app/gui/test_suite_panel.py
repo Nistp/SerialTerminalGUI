@@ -33,7 +33,7 @@ _HEADINGS = {
 _WIDTHS = {
     "result":     80,
     "enabled":    30,
-    "nav":        24,
+    "nav":        32,
     "name":       140,
     "command":    140,
     "expected":   160,
@@ -70,6 +70,7 @@ class TestSuitePanel(ttk.Frame):
         self._pass_count = 0
         self._fail_count = 0
         self._total_count = 0
+        self._current_csv_path = None
         # Maps test ID → result label string; persists across tree repopulations
         self._result_map: dict = {}
         # Accumulated results for the current (or most recent) run
@@ -291,6 +292,7 @@ class TestSuitePanel(ttk.Frame):
         self._tree.delete(*self._tree.get_children())
         for tc in self._tests:
             has_nav = bool(tc.setup_commands or tc.teardown_commands or tc.trigger_commands)
+            nav_indicator = ("M" if tc.manual else "") + ("⚙" if has_nav else "")
             result_entry = self._result_map.get(tc.id)  # (label, status) or None
             result_label = result_entry[0] if result_entry else ""
             result_tag   = result_entry[1] if result_entry else ""
@@ -298,7 +300,7 @@ class TestSuitePanel(ttk.Frame):
                 "", "end", iid=tc.id,
                 values=(
                     _CHECKBOX_CHECKED if tc.enabled else _CHECKBOX_EMPTY,
-                    "⚙" if has_nav else "",
+                    nav_indicator,
                     tc.name,
                     tc.command,
                     tc.expected.replace("\n", " ∧ "),
@@ -404,8 +406,20 @@ class TestSuitePanel(ttk.Frame):
                 row=row, column=1, sticky="ew", **pad
             )
 
+        # --- Manual verdict checkbox ---
+        manual_row = len(single_fields)
+        self._manual_var = tk.BooleanVar(value=tc.manual if tc else False)
+        ttk.Label(dialog, text="Manual verdict:").grid(
+            row=manual_row, column=0, sticky="e", **pad
+        )
+        ttk.Checkbutton(
+            dialog,
+            text="Pause run — ask user for result",
+            variable=self._manual_var,
+        ).grid(row=manual_row, column=1, sticky="w", **pad)
+
         # --- Multiline: expected patterns ---
-        exp_row = len(single_fields)
+        exp_row = len(single_fields) + 1
         ttk.Label(
             dialog,
             text="Expected\n(one per line, all must match):",
@@ -573,6 +587,7 @@ class TestSuitePanel(ttk.Frame):
                 if self._trigger_timing_var.get() == "After setup commands"
                 else "before_setup"
             )
+            manual = self._manual_var.get()
 
             if tc is not None:
                 tc.name              = name
@@ -586,6 +601,7 @@ class TestSuitePanel(ttk.Frame):
                 tc.numeric_checks    = numeric_checks
                 tc.trigger_commands  = trigger_cmds
                 tc.trigger_timing    = trigger_timing
+                tc.manual            = manual
             else:
                 new_tc = TestCase(
                     name=name,
@@ -599,6 +615,7 @@ class TestSuitePanel(ttk.Frame):
                     numeric_checks=numeric_checks,
                     trigger_commands=trigger_cmds,
                     trigger_timing=trigger_timing,
+                    manual=manual,
                 )
                 self._tests.append(new_tc)
 
@@ -618,6 +635,50 @@ class TestSuitePanel(ttk.Frame):
     # ------------------------------------------------------------------ #
     #  Run logic
     # ------------------------------------------------------------------ #
+
+    def _on_manual_input(self, test) -> None:
+        """Show a non-modal dialog asking the user for the test verdict."""
+        dialog = tk.Toplevel(self)
+        dialog.title("Manual Test Verdict")
+        dialog.resizable(False, False)
+        dialog.attributes("-topmost", True)
+        dialog.columnconfigure(1, weight=1)
+
+        pad = {"padx": 10, "pady": 4}
+
+        ttk.Label(dialog, text=f"Test:  {test.name}",
+                  font=("", 10, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", **pad)
+        if test.command.strip():
+            ttk.Label(dialog, text=f"Command sent:  {test.command}").grid(
+                row=1, column=0, columnspan=2, sticky="w", **pad
+            )
+
+        ttk.Separator(dialog, orient="horizontal").grid(
+            row=2, column=0, columnspan=2, sticky="ew", pady=6, padx=6
+        )
+
+        ttk.Label(dialog, text="Result:").grid(row=3, column=0, sticky="e", **pad)
+        verdict_var = tk.StringVar(value="PASS")
+        verdict_frame = ttk.Frame(dialog)
+        verdict_frame.grid(row=3, column=1, sticky="w", **pad)
+        ttk.Radiobutton(verdict_frame, text="PASS", variable=verdict_var,
+                        value="PASS").pack(side="left", padx=4)
+        ttk.Radiobutton(verdict_frame, text="FAIL", variable=verdict_var,
+                        value="FAIL").pack(side="left", padx=4)
+
+        ttk.Label(dialog, text="Actual response:").grid(row=4, column=0, sticky="ne", **pad)
+        actual_text = tk.Text(dialog, height=4, width=44, wrap="word", font=("Courier", 9))
+        actual_text.grid(row=4, column=1, sticky="ew", **pad)
+
+        def _submit():
+            self._runner.set_manual_result(verdict_var.get(),
+                                           actual_text.get("1.0", "end-1c").strip())
+            dialog.destroy()
+
+        ttk.Button(dialog, text="OK", command=_submit, width=10).grid(
+            row=5, column=0, columnspan=2, pady=(4, 10)
+        )
+        dialog.bind("<Return>", lambda _: _submit())
 
     def _run_selected(self) -> None:
         sel = self._tree.selection()
@@ -687,6 +748,9 @@ class TestSuitePanel(ttk.Frame):
         def _safe_on_done() -> None:
             self.after(0, self._on_done)
 
+        def _safe_on_manual_input(test) -> None:
+            self.after(0, lambda t=test: self._on_manual_input(t))
+
         trigger_handler = self._trigger_handler if self._trigger_handler.is_connected else None
         self._runner.run(
             tests=tests,
@@ -696,6 +760,7 @@ class TestSuitePanel(ttk.Frame):
             on_done=_safe_on_done,
             delay_ms=delay_ms,
             trigger_handler=trigger_handler,
+            on_manual_input=_safe_on_manual_input,
         )
 
     def _stop_run(self) -> None:
