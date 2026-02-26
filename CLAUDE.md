@@ -25,7 +25,7 @@ SerialTerminalGUI/
         ├── main_window.py         # Integration hub — owns handler, logger, poll loop
         ├── connection_panel.py    # Port / baud / parity / line-ending controls + log folder selector
         ├── terminal_panel.py      # Dark scrolled terminal with colour-coded TX/RX
-        ├── command_panel.py       # Command entry + Up/Down history
+        ├── command_panel.py       # Command entry + Up/Down history + special-char buttons (ESC/TAB/^C)
         └── test_suite_panel.py   # Test CRUD, treeview with live result column, runner
 ```
 
@@ -44,13 +44,15 @@ TX commands are **not** read back from the serial port. Instead `_on_send_reques
 - `TestRunner` runs in its own daemon thread and communicates results back via `root.after(0, callback)` — never calls widget methods directly.
 - **Capture mode**: before sending a test command `handler.start_capture()` creates a secondary `_capture_queue`. The reader thread writes every incoming message to both `rx_queue` (terminal) and `_capture_queue` (test runner). After the test `handler.stop_capture()` sets `_capture_queue = None`.
 - **Silent navigation commands** (`setup_commands` / `teardown_commands` on `TestCase`): sent via `_execute_silent()` which uses capture mode but **never puts anything into `rx_queue`**. This means menu-navigation steps are invisible in the terminal and absent from the session log.
-- **Escape expansion**: the token `<ESC>` in setup/teardown command strings is replaced with `\x1b` before sending, allowing control-character navigation.
+- **Escape expansion**: the token `<ESC>` in setup/teardown/trigger command strings is replaced with `\x1b` before sending, allowing control-character navigation.
+- **Trigger device**: a secondary `SerialHandler` (`_trigger_handler`) owned by `TestSuitePanel`. When connected, `TestRunner.run()` receives it as `trigger_handler`. Before or after setup commands (controlled by `trigger_timing`), the runner calls `_run_trigger_commands()` which fires each `trigger_command` to the trigger port as fire-and-forget (no capture, no response wait, errors silently swallowed). The trigger handler is disconnected in `TestSuitePanel.cleanup()` on window close.
 
 ### Config persistence
-- `config.json` in the project root stores last-used serial settings, the log folder path, and the full test suite definition (serialised `TestCase` dicts).
+- `config.json` in the project root stores last-used serial settings, the log folder path, trigger device settings, and the full test suite definition (serialised `TestCase` dicts).
 - `config.json` is in `.gitignore` — it is machine-specific.
-- Config is saved on every successful connect, when the log folder changes, and on clean shutdown. New keys added to `DEFAULTS` in `config.py` are automatically merged, so old config files remain valid.
+- Config is saved on every successful connect, when the log folder changes, when the trigger device connects, and on clean shutdown. New keys added to `DEFAULTS` in `config.py` are automatically merged, so old config files remain valid.
 - `log_dir` key: empty string means use the default (`~/serial_logs`). `AppConfig.effective_log_dir()` resolves this.
+- `trigger_port` / `trigger_baud`: last-used trigger device port and baud rate (saved when trigger connects).
 
 ### CSV output files
 Two CSV files are written to the configured log folder on each test run:
@@ -72,10 +74,11 @@ ConnectionPanel   (always visible above notebook)
 ttk.Notebook
 ├── Tab 1 "Terminal"
 │   ├── TerminalPanel   (dark ScrolledText, expands)
-│   └── CommandPanel    (entry + send + history)
+│   └── CommandPanel    (entry + send + history + [ESC] [TAB] [^C] special-char buttons)
 └── Tab 2 "Test Suite"
+    ├── Trigger Device  (Port / Refresh / Baud / [Connect Trigger])
     ├── Toolbar         (Add / Edit / Delete / Up / Down)
-    ├── Treeview        (Result | ✓ | ⚙ | Name | Command | Expected | Terminator | Timeout)
+    ├── Treeview        (✓ | ⚙ | Name | Command | Expected | Terminator | Timeout | Result)
     ├── Run bar         (Run Selected / Run All / Stop / ↻ Loop / delay spinbox)
     ├── Results panel   (ScrolledText with coloured background boxes per result)
     └── Summary bar     (pass count / Export CSV… / Clear Results)
@@ -112,11 +115,14 @@ Used in both the Treeview row foreground and the results panel background boxes.
 | `terminator`       | `"OK"`  | Line that signals end of response |
 | `timeout_ms`       | `2000`  | Timeout waiting for terminator |
 | `numeric_checks`   | `""`    | Newline-separated numeric assertions (see format below) |
-| `setup_commands`   | `[]`    | Navigation commands sent **silently** before the test |
-| `teardown_commands`| `[]`    | Navigation commands sent **silently** after the test |
-| `nav_timeout_ms`   | `1000`  | Per-step timeout for each silent navigation command |
-| `enabled`          | `True`  | Included in "Run All" when checked |
-| `id`               | uuid4   | Stable identifier used as Treeview iid |
+| `setup_commands`   | `[]`            | Navigation commands sent **silently** before the test |
+| `teardown_commands`| `[]`            | Navigation commands sent **silently** after the test |
+| `nav_timeout_ms`   | `1000`          | Per-step timeout for each silent navigation command |
+| `trigger_commands` | `[]`            | Commands sent fire-and-forget to the trigger port (no response waited) |
+| `trigger_timing`   | `"before_setup"`| When to fire trigger: `"before_setup"` or `"after_setup"` |
+| `manual`           | `False`         | If `True`, runner pauses after sending the command and shows a dialog asking the user to choose PASS/FAIL and enter the actual response |
+| `enabled`          | `True`          | Included in "Run All" when checked |
+| `id`               | uuid4           | Stable identifier used as Treeview iid |
 
 ### Numeric check syntax
 
@@ -145,3 +151,5 @@ A test result is **PASS** only when **all** of the following hold:
 - `test_suite_panel.py` is the only panel that receives a `handler_provider` lambda (not the handler directly) so it can check `is_connected` at run time without holding a stale reference.
 - `_result_map: dict[test_id → (label, status)]` in `TestSuitePanel` persists results across tree repopulations (e.g. after reorder), and is cleared by "Clear Results" or at the start of each new run.
 - `_current_csv_path` in `TestSuitePanel` tracks the active per-run CSV across loop iterations; it is set to `None` when a non-looping run finishes or Stop is pressed, causing the next run to open a fresh file.
+- The Treeview nav column shows `M` when `manual=True`, `⚙` when setup/teardown/trigger commands are present, and `M⚙` when both apply.
+- `CommandPanel` special-char buttons (ESC / TAB / ^C) send a single control character with **no** line ending appended, using `on_send(char, b"")`.
