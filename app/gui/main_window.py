@@ -14,9 +14,10 @@ _POLL_MAX = 200  # max messages drained per poll tick
 
 
 class MainWindow:
-    def __init__(self, root: tk.Tk, config: AppConfig) -> None:
+    def __init__(self, root: tk.Tk, config: AppConfig, config2: AppConfig) -> None:
         self.root = root
         self._config = config
+        self._config2 = config2
         self._handler = SerialHandler()
         self._logger = SessionLogger()
 
@@ -61,16 +62,46 @@ class MainWindow:
         # Tab 2: Test Suite
         tab2 = ttk.Frame(self._notebook)
         tab2.columnconfigure(0, weight=1)
-        tab2.rowconfigure(0, weight=1)
+        tab2.rowconfigure(1, weight=1)
         self._notebook.add(tab2, text="  Test Suite  ")
 
+        # Toggle button bar
+        suite_bar = ttk.Frame(tab2)
+        suite_bar.grid(row=0, column=0, sticky="ew", padx=4, pady=(2, 0))
+        self._suite2_btn = ttk.Button(suite_bar, text="\uff0b Add Suite 2",
+                                      command=self._toggle_suite2)
+        self._suite2_btn.pack(side="left")
+
+        # PanedWindow takes the remaining space
+        self._paned = ttk.PanedWindow(tab2, orient="horizontal")
+        self._paned.grid(row=1, column=0, sticky="nsew")
+
+        frame1 = ttk.LabelFrame(self._paned, text="Suite 1")
+        self._frame2 = ttk.LabelFrame(self._paned, text="Suite 2")
+
+        self._paned.add(frame1, weight=1)
+        # frame2 not added yet — added when user enables it
+
         self._test_panel = TestSuitePanel(
-            tab2,
+            frame1,
             config=self._config,
             handler_provider=lambda: self._handler,
             le_provider=self._conn_panel.get_line_ending,
         )
-        self._test_panel.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
+        self._test_panel.pack(fill="both", expand=True, padx=2, pady=2)
+
+        self._test_panel2 = TestSuitePanel(
+            self._frame2,
+            config=self._config2,
+            handler_provider=lambda: self._handler,
+            le_provider=self._conn_panel.get_line_ending,
+        )
+        self._test_panel2.pack(fill="both", expand=True, padx=2, pady=2)
+        self._test_panel2.set_enabled(False)  # starts disconnected-disabled
+
+        # Restore visibility from config
+        if self._config.get("suite_2_visible", False):
+            self._show_suite2()
 
         # Status bar
         self._status_frame = ttk.Frame(self.root)
@@ -92,11 +123,34 @@ class MainWindow:
             anchor="w",
         ).pack(side="left", fill="x", expand=True)
 
+    # ------------------------------------------------------------------ #
+    #  Suite 2 toggle
+    # ------------------------------------------------------------------ #
+
+    def _toggle_suite2(self) -> None:
+        if self._config.get("suite_2_visible", False):
+            self._hide_suite2()
+        else:
+            self._show_suite2()
+        self._config.save()
+
+    def _show_suite2(self) -> None:
+        self._paned.add(self._frame2, weight=1)
+        self._suite2_btn.config(text="\uff0d Remove Suite 2")
+        self._config["suite_2_visible"] = True
+
+    def _hide_suite2(self) -> None:
+        self._paned.forget(self._frame2)
+        self._suite2_btn.config(text="\uff0b Add Suite 2")
+        self._config["suite_2_visible"] = False
+
     def _wire_callbacks(self) -> None:
         self._conn_panel.on_connect    = self._on_connect_request
         self._conn_panel.on_disconnect = self._on_disconnect_request
         self._cmd_panel.on_send        = self._on_send_request
         self._cmd_panel.set_line_ending_provider(self._conn_panel.get_line_ending)
+        self._test_panel.on_run_state_change  = lambda r: self._test_panel2.set_peer_running(r)
+        self._test_panel2.on_run_state_change = lambda r: self._test_panel.set_peer_running(r)
 
     # ------------------------------------------------------------------ #
     #  Queue polling
@@ -178,6 +232,7 @@ class MainWindow:
         self._conn_panel.set_connected(connected)
         self._cmd_panel.set_enabled(connected)
         self._test_panel.set_enabled(connected)
+        self._test_panel2.set_enabled(connected)
 
     def _save_connection_settings(self, params: dict) -> None:
         self._config["port"]        = params["port"]
@@ -209,6 +264,7 @@ class MainWindow:
 
     def _on_closing(self) -> None:
         self._test_panel.cleanup()
+        self._test_panel2.cleanup()
         if self._handler.is_connected:
             self._handler.disconnect()
         self._logger.close_session()

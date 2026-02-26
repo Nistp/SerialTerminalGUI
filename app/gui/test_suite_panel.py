@@ -81,6 +81,8 @@ class TestSuitePanel(ttk.Frame):
         self._current_run_tests: List[TestCase] = []
         self._stop_requested: bool = False
         self._loop_after_id = None   # after() ID while a loop-interval countdown is pending
+        self._peer_running: bool = False
+        self.on_run_state_change: Optional[Callable[[bool], None]] = None
 
         self._setup_ui()
         self._load_tests_from_config()
@@ -691,16 +693,23 @@ class TestSuitePanel(ttk.Frame):
             messagebox.showinfo("Run", "Select one or more tests first.")
             return
         tests = [t for t in self._tests if t.id in sel]
-        self._start_run(tests)
+        self._start_run(tests, fresh_start=True)
 
     def _run_all(self) -> None:
         tests = [t for t in self._tests if t.enabled]
         if not tests:
             messagebox.showinfo("Run All", "No enabled tests.")
             return
-        self._start_run(tests)
+        self._start_run(tests, fresh_start=True)
 
-    def _start_run(self, tests: List[TestCase]) -> None:
+    def _start_run(self, tests: List[TestCase], *, fresh_start: bool = False) -> None:
+        if self._peer_running:
+            messagebox.showwarning(
+                "Suite Busy",
+                "The other test suite is currently running. Stop it before starting this one.",
+            )
+            return
+
         handler = self._handler_provider()
         if not handler.is_connected:
             messagebox.showwarning("Not Connected", "Connect to a serial port first.")
@@ -768,6 +777,9 @@ class TestSuitePanel(ttk.Frame):
             on_manual_input=_safe_on_manual_input,
         )
 
+        if fresh_start and self.on_run_state_change:
+            self.on_run_state_change(True)
+
     def _stop_run(self) -> None:
         self._stop_requested = True
         self._runner.stop()
@@ -780,6 +792,8 @@ class TestSuitePanel(ttk.Frame):
             self._run_sel_btn.config(state="normal")
             self._run_all_btn.config(state="normal")
             self._stop_btn.config(state="disabled")
+            if self.on_run_state_change:
+                self.on_run_state_change(False)
 
     def _start_loop_countdown(self, seconds: int) -> None:
         self._loop_countdown_remaining = seconds
@@ -878,6 +892,8 @@ class TestSuitePanel(ttk.Frame):
         self._run_sel_btn.config(state="normal")
         self._run_all_btn.config(state="normal")
         self._stop_btn.config(state="disabled")
+        if self.on_run_state_change:
+            self.on_run_state_change(False)
 
     def _append_run_row(self, path, ts: datetime.datetime) -> None:
         """Append one row to the cumulative CSV log.
@@ -1009,8 +1025,20 @@ class TestSuitePanel(ttk.Frame):
         self._populate_tree()
 
     # ------------------------------------------------------------------ #
-    #  Enable / disable
+    #  Enable / disable  &  peer interlock
     # ------------------------------------------------------------------ #
+
+    def set_peer_running(self, running: bool) -> None:
+        """Called by the other suite panel to lock/unlock this panel's run buttons."""
+        self._peer_running = running
+        if running:
+            self._run_sel_btn.config(state="disabled")
+            self._run_all_btn.config(state="disabled")
+        elif not self._runner.is_running and self._loop_after_id is None:
+            connected = self._handler_provider().is_connected
+            state = "normal" if connected else "disabled"
+            self._run_sel_btn.config(state=state)
+            self._run_all_btn.config(state=state)
 
     def set_enabled(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
