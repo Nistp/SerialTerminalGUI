@@ -30,6 +30,7 @@ DEFAULTS: dict = {
     "poll_interval_ms": 50,
     "max_lines": 5000,
     "test_delay_ms": 200,
+    "loop_interval_s": 0,
     "tests": [],
     "trigger_port": "",
     "trigger_baud": 9600,

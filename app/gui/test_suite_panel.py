@@ -80,6 +80,7 @@ class TestSuitePanel(ttk.Frame):
         self._loop_var = tk.BooleanVar(value=False)
         self._current_run_tests: List[TestCase] = []
         self._stop_requested: bool = False
+        self._loop_after_id = None   # after() ID while a loop-interval countdown is pending
 
         self._setup_ui()
         self._load_tests_from_config()
@@ -186,6 +187,10 @@ class TestSuitePanel(ttk.Frame):
 
         ttk.Separator(run_bar, orient="vertical").pack(side="left", padx=8, fill="y")
         ttk.Checkbutton(run_bar, text="↻ Loop", variable=self._loop_var).pack(side="left", padx=2)
+        ttk.Label(run_bar, text="interval (s):").pack(side="left", padx=(4, 2))
+        self._loop_interval_var = tk.StringVar(value=str(self._config.get("loop_interval_s", 0)))
+        ttk.Spinbox(run_bar, from_=0, to=3600, increment=5,
+                    textvariable=self._loop_interval_var, width=5).pack(side="left", padx=(0, 4))
 
         ttk.Separator(run_bar, orient="vertical").pack(side="left", padx=8, fill="y")
         ttk.Label(run_bar, text="Delay between tests (ms):").pack(side="left")
@@ -766,6 +771,34 @@ class TestSuitePanel(ttk.Frame):
     def _stop_run(self) -> None:
         self._stop_requested = True
         self._runner.stop()
+        if self._loop_after_id is not None:
+            self.after_cancel(self._loop_after_id)
+            self._loop_after_id = None
+            total = self._pass_count + self._fail_count
+            self._summary_var.set(f"{self._pass_count} / {total} passed")
+            self._current_csv_path = None
+            self._run_sel_btn.config(state="normal")
+            self._run_all_btn.config(state="normal")
+            self._stop_btn.config(state="disabled")
+
+    def _start_loop_countdown(self, seconds: int) -> None:
+        self._loop_countdown_remaining = seconds
+        self._tick_loop_countdown()
+
+    def _tick_loop_countdown(self) -> None:
+        if self._stop_requested or not self._loop_var.get():
+            self._loop_after_id = None
+            return
+        if self._loop_countdown_remaining <= 0:
+            self._loop_after_id = None
+            self._start_run(self._current_run_tests)
+            return
+        total = self._pass_count + self._fail_count
+        self._summary_var.set(
+            f"{self._pass_count} / {total} passed  —  next run in {self._loop_countdown_remaining}s"
+        )
+        self._loop_countdown_remaining -= 1
+        self._loop_after_id = self.after(1000, self._tick_loop_countdown)
 
     def _on_result(self, result: TestResult) -> None:
         status = result.status
@@ -830,7 +863,14 @@ class TestSuitePanel(ttk.Frame):
 
         # Restart the same run if loop mode is active and Stop was not pressed
         if self._loop_var.get() and not self._stop_requested:
-            self._start_run(self._current_run_tests)
+            try:
+                interval_s = int(self._loop_interval_var.get())
+            except ValueError:
+                interval_s = 0
+            if interval_s > 0:
+                self._start_loop_countdown(interval_s)
+            else:
+                self._start_run(self._current_run_tests)
             return
 
         # Run has ended — next Start should open a fresh CSV

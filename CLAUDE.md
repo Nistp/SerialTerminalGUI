@@ -46,6 +46,7 @@ TX commands are **not** read back from the serial port. Instead `_on_send_reques
 - **Silent navigation commands** (`setup_commands` / `teardown_commands` on `TestCase`): sent via `_execute_silent()` which uses capture mode but **never puts anything into `rx_queue`**. This means menu-navigation steps are invisible in the terminal and absent from the session log.
 - **Escape expansion**: the token `<ESC>` in setup/teardown/trigger command strings is replaced with `\x1b` before sending, allowing control-character navigation.
 - **Trigger device**: a secondary `SerialHandler` (`_trigger_handler`) owned by `TestSuitePanel`. When connected, `TestRunner.run()` receives it as `trigger_handler`. Before or after setup commands (controlled by `trigger_timing`), the runner calls `_run_trigger_commands()` which fires each `trigger_command` to the trigger port as fire-and-forget (no capture, no response wait, errors silently swallowed). The trigger handler is disconnected in `TestSuitePanel.cleanup()` on window close.
+- **Manual tests** (`manual=True` on `TestCase`): the runner sends the command (if any), then calls `on_manual_input(test)` — a callback scheduled via `root.after(0, …)` — which opens a non-modal verdict dialog in the GUI. The runner thread blocks in a 50 ms polling loop on `_manual_event`, also checking `_stop_event` each tick. When the user clicks OK, `TestSuitePanel` calls `TestRunner.set_manual_result(status, actual)` which stores the result and sets `_manual_event`, unblocking the runner. Capture mode is **not** used for manual tests.
 
 ### Config persistence
 - `config.json` in the project root stores last-used serial settings, the log folder path, trigger device settings, and the full test suite definition (serialised `TestCase` dicts).
@@ -79,7 +80,7 @@ ttk.Notebook
     ├── Trigger Device  (Port / Refresh / Baud / [Connect Trigger])
     ├── Toolbar         (Add / Edit / Delete / Up / Down)
     ├── Treeview        (✓ | ⚙ | Name | Command | Expected | Terminator | Timeout | Result)
-    ├── Run bar         (Run Selected / Run All / Stop / ↻ Loop / delay spinbox)
+    ├── Run bar         (Run Selected / Run All / Stop / ↻ Loop / loop interval spinbox / delay spinbox)
     ├── Results panel   (ScrolledText with coloured background boxes per result)
     └── Summary bar     (pass count / Export CSV… / Clear Results)
 StatusBar             (connection info + current log file path)
@@ -139,10 +140,12 @@ Each non-empty line in `numeric_checks` must follow one of:
 
 ### Pass/fail logic
 
-A test result is **PASS** only when **all** of the following hold:
+For automated tests, a result is **PASS** only when **all** of the following hold:
 1. The terminator line is received within `timeout_ms`.
 2. Every non-empty line in `expected` appears as a substring of the response.
 3. Every line in `numeric_checks` evaluates to true.
+
+For **manual tests** (`manual=True`), the logic above is skipped entirely — the status and actual response come directly from the user's dialog input.
 
 ## Conventions
 
@@ -151,5 +154,6 @@ A test result is **PASS** only when **all** of the following hold:
 - `test_suite_panel.py` is the only panel that receives a `handler_provider` lambda (not the handler directly) so it can check `is_connected` at run time without holding a stale reference.
 - `_result_map: dict[test_id → (label, status)]` in `TestSuitePanel` persists results across tree repopulations (e.g. after reorder), and is cleared by "Clear Results" or at the start of each new run.
 - `_current_csv_path` in `TestSuitePanel` tracks the active per-run CSV across loop iterations; it is set to `None` when a non-looping run finishes or Stop is pressed, causing the next run to open a fresh file.
+- **Loop interval**: when "↻ Loop" is active and the interval spinbox is > 0, `_on_done` calls `_start_loop_countdown(seconds)` instead of restarting immediately. `_tick_loop_countdown` reschedules itself every 1 s via `self.after(1000, …)`, stores the `after()` ID in `_loop_after_id`, and updates the summary bar with "next run in Xs". When the countdown reaches 0 it calls `_start_run`. Clicking Stop during a countdown cancels the pending `after()` call and re-enables the run buttons immediately.
 - The Treeview nav column shows `M` when `manual=True`, `⚙` when setup/teardown/trigger commands are present, and `M⚙` when both apply.
 - `CommandPanel` special-char buttons (ESC / TAB / ^C) send a single control character with **no** line ending appended, using `on_send(char, b"")`.
