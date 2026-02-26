@@ -13,14 +13,15 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-from app.config import AppConfig
+from app.config import AppConfig, CONFIG_2_PATH
 from app.gui.main_window import MainWindow
 
 
 def main() -> None:
-    config = AppConfig.load()
+    config1 = AppConfig.load()
+    config2 = AppConfig.load(path=CONFIG_2_PATH)
     root = tk.Tk()
-    MainWindow(root, config)
+    MainWindow(root, config1, config2)
     root.mainloop()
 
 

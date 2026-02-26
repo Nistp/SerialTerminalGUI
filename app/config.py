@@ -2,7 +2,10 @@ import json
 import pathlib
 import sys
 
-CONFIG_PATH = pathlib.Path(__file__).parent.parent / "config.json"
+_ROOT = pathlib.Path(__file__).parent.parent
+CONFIG_PATH   = _ROOT / "config.json"    # legacy — kept for migration only
+CONFIG_1_PATH = _ROOT / "config_1.json"  # Suite 1
+CONFIG_2_PATH = _ROOT / "config_2.json"  # Suite 2
 
 BAUD_RATES = [300, 1200, 2400, 4800, 9600, 19200, 38400, 57600,
               115200, 230400, 460800, 921600]
@@ -34,27 +37,38 @@ DEFAULTS: dict = {
     "tests": [],
     "trigger_port": "",
     "trigger_baud": 9600,
+    "suite_2_visible": False,
 }
 
 
 class AppConfig:
-    def __init__(self, data: dict) -> None:
+    def __init__(self, data: dict, path: pathlib.Path) -> None:
         self._data = data
+        self._path = path
 
     @classmethod
-    def load(cls) -> "AppConfig":
+    def load(cls, path: pathlib.Path = None) -> "AppConfig":
+        if path is None:
+            path = CONFIG_1_PATH
+            # One-time migration: rename legacy config.json → config_1.json
+            if CONFIG_PATH.exists() and not CONFIG_1_PATH.exists():
+                try:
+                    CONFIG_PATH.rename(CONFIG_1_PATH)
+                except Exception as exc:
+                    print(f"[config] migration failed: {exc}", file=sys.stderr)
+
         data = dict(DEFAULTS)
         try:
-            raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            raw = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(raw, dict):
                 data.update(raw)
         except Exception:
             pass
-        return cls(data)
+        return cls(data, path)
 
     def save(self) -> None:
         try:
-            CONFIG_PATH.write_text(
+            self._path.write_text(
                 json.dumps(self._data, indent=2),
                 encoding="utf-8",
             )
