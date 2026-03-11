@@ -1,30 +1,25 @@
-import queue
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import ttk
 
-from app.config import AppConfig
-from app.logger import SessionLogger
-from app.serial_handler import Direction, SerialHandler, TerminalMessage
-from app.gui.connection_panel import ConnectionPanel
-from app.gui.terminal_panel import TerminalPanel
-from app.gui.command_panel import CommandPanel
+from app.config import AppConfig, SUITE_CONFIG_PATHS
+from app.gui.terminal_pane import TerminalPane
 from app.gui.test_suite_panel import TestSuitePanel
 
-_POLL_MAX = 200  # max messages drained per poll tick
+_MAX_TERMINALS = 4
+_MAX_SUITES = 4
 
 
 class MainWindow:
-    def __init__(self, root: tk.Tk, config: AppConfig, config2: AppConfig) -> None:
+    def __init__(self, root: tk.Tk, config: AppConfig) -> None:
         self.root = root
         self._config = config
-        self._config2 = config2
-        self._handler = SerialHandler()
-        self._logger = SessionLogger()
+
+        self._panes: list = []         # TerminalPane instances
+        self._suite_panels: list = []  # TestSuitePanel instances
+        self._suite_configs: list = [] # AppConfig per suite (index 0 == self._config)
 
         self._setup_window()
         self._create_widgets()
-        self._wire_callbacks()
-        self._start_poll()
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
 
@@ -34,224 +29,176 @@ class MainWindow:
 
     def _setup_window(self) -> None:
         self.root.title("Serial Terminal")
-        self.root.minsize(900, 620)
+        self.root.minsize(1100, 680)
         self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(1, weight=1)
+        self.root.rowconfigure(0, weight=1)
 
     def _create_widgets(self) -> None:
-        # Connection panel (always visible, above notebook)
-        self._conn_panel = ConnectionPanel(self.root, self._config)
-        self._conn_panel.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 0))
-
-        # Notebook: Terminal | Test Suite
         self._notebook = ttk.Notebook(self.root)
-        self._notebook.grid(row=1, column=0, sticky="nsew", padx=6, pady=4)
+        self._notebook.grid(row=0, column=0, sticky="nsew", padx=6, pady=4)
 
-        # Tab 1: Terminal
+        # ── Tab 1: Terminal ──────────────────────────────────────────── #
         tab1 = ttk.Frame(self._notebook)
         tab1.columnconfigure(0, weight=1)
-        tab1.rowconfigure(0, weight=1)
+        tab1.rowconfigure(1, weight=1)
         self._notebook.add(tab1, text="  Terminal  ")
 
-        self._terminal = TerminalPanel(tab1, self._config)
-        self._terminal.grid(row=0, column=0, sticky="nsew")
+        term_toolbar = ttk.Frame(tab1)
+        term_toolbar.grid(row=0, column=0, sticky="ew", padx=4, pady=(2, 0))
 
-        self._cmd_panel = CommandPanel(tab1, self._config)
-        self._cmd_panel.grid(row=1, column=0, sticky="ew", padx=2, pady=(0, 2))
+        self._add_term_btn = ttk.Button(
+            term_toolbar, text="\uff0b Add Terminal", command=self._add_terminal
+        )
+        self._add_term_btn.pack(side="left", padx=(0, 4))
 
-        # Tab 2: Test Suite
+        self._remove_term_btn = ttk.Button(
+            term_toolbar, text="\uff0d Remove Terminal", command=self._remove_terminal
+        )
+        self._remove_term_btn.pack(side="left")
+
+        self._term_paned = ttk.PanedWindow(tab1, orient="horizontal")
+        self._term_paned.grid(row=1, column=0, sticky="nsew", padx=4, pady=(2, 4))
+
+        n_terms = max(1, min(_MAX_TERMINALS, len(self._config.get("terminals", [{}]))))
+        for i in range(n_terms):
+            self._add_terminal(restore_index=i)
+
+        self._update_terminal_buttons()
+
+        # ── Tab 2: Test Suite ────────────────────────────────────────── #
         tab2 = ttk.Frame(self._notebook)
         tab2.columnconfigure(0, weight=1)
         tab2.rowconfigure(1, weight=1)
         self._notebook.add(tab2, text="  Test Suite  ")
 
-        # Toggle button bar
-        suite_bar = ttk.Frame(tab2)
-        suite_bar.grid(row=0, column=0, sticky="ew", padx=4, pady=(2, 0))
-        self._suite2_btn = ttk.Button(suite_bar, text="\uff0b Add Suite 2",
-                                      command=self._toggle_suite2)
-        self._suite2_btn.pack(side="left")
+        suite_toolbar = ttk.Frame(tab2)
+        suite_toolbar.grid(row=0, column=0, sticky="ew", padx=4, pady=(2, 0))
 
-        # PanedWindow takes the remaining space
-        self._paned = ttk.PanedWindow(tab2, orient="horizontal")
-        self._paned.grid(row=1, column=0, sticky="nsew")
+        self._add_suite_btn = ttk.Button(
+            suite_toolbar, text="\uff0b Add Suite", command=self._add_suite
+        )
+        self._add_suite_btn.pack(side="left", padx=(0, 4))
 
-        frame1 = ttk.LabelFrame(self._paned, text="Suite 1")
-        self._frame2 = ttk.LabelFrame(self._paned, text="Suite 2")
+        self._remove_suite_btn = ttk.Button(
+            suite_toolbar, text="\uff0d Remove Suite", command=self._remove_suite
+        )
+        self._remove_suite_btn.pack(side="left")
 
-        self._paned.add(frame1, weight=1)
-        # frame2 not added yet — added when user enables it
+        self._suite_paned = ttk.PanedWindow(tab2, orient="horizontal")
+        self._suite_paned.grid(row=1, column=0, sticky="nsew")
 
-        self._test_panel = TestSuitePanel(frame1, config=self._config)
-        self._test_panel.pack(fill="both", expand=True, padx=2, pady=2)
+        n_suites = max(1, min(_MAX_SUITES, self._config.get("suite_count", 1)))
+        for _ in range(n_suites):
+            self._add_suite(restore=True)
 
-        self._test_panel2 = TestSuitePanel(self._frame2, config=self._config2)
-        self._test_panel2.pack(fill="both", expand=True, padx=2, pady=2)
-
-        # Restore visibility from config
-        if self._config.get("suite_2_visible", False):
-            self._show_suite2()
-
-        # Status bar
-        self._status_frame = ttk.Frame(self.root)
-        self._status_frame.grid(row=2, column=0, sticky="ew", padx=6, pady=(0, 4))
-
-        self._status_var = tk.StringVar(value="Disconnected")
-        ttk.Label(
-            self._status_frame,
-            textvariable=self._status_var,
-            relief="sunken",
-            anchor="w",
-        ).pack(side="left", fill="x", expand=True, padx=(0, 4))
-
-        self._log_var = tk.StringVar(value="")
-        ttk.Label(
-            self._status_frame,
-            textvariable=self._log_var,
-            relief="sunken",
-            anchor="w",
-        ).pack(side="left", fill="x", expand=True)
+        self._update_suite_buttons()
 
     # ------------------------------------------------------------------ #
-    #  Suite 2 toggle
+    #  Terminal pane management
     # ------------------------------------------------------------------ #
 
-    def _toggle_suite2(self) -> None:
-        if self._config.get("suite_2_visible", False):
-            self._hide_suite2()
+    def _add_terminal(self, restore_index: int = None) -> None:
+        if len(self._panes) >= _MAX_TERMINALS:
+            return
+
+        index = restore_index if restore_index is not None else len(self._panes)
+
+        frame = ttk.LabelFrame(self._term_paned, text=f"Terminal {index + 1}")
+        self._term_paned.add(frame, weight=1)
+
+        pane = TerminalPane(frame, self._config, terminal_index=index)
+        pane.pack(fill="both", expand=True)
+
+        self._panes.append(pane)
+        self._update_terminal_buttons()
+
+        if restore_index is None:
+            self._config.set_terminal_count(len(self._panes))
+            self._config.save()
+
+    def _remove_terminal(self) -> None:
+        if len(self._panes) <= 1:
+            return
+
+        self._panes[-1].cleanup()
+
+        children = self._term_paned.panes()
+        last_frame = self._term_paned.nametowidget(children[-1])
+        self._term_paned.forget(last_frame)
+        last_frame.destroy()
+
+        self._panes.pop()
+        self._config.set_terminal_count(len(self._panes))
+        self._config.save()
+        self._update_terminal_buttons()
+
+    def _update_terminal_buttons(self) -> None:
+        n = len(self._panes)
+        self._add_term_btn.config(state="normal" if n < _MAX_TERMINALS else "disabled")
+        self._remove_term_btn.config(state="normal" if n > 1 else "disabled")
+
+    # ------------------------------------------------------------------ #
+    #  Suite pane management
+    # ------------------------------------------------------------------ #
+
+    def _add_suite(self, restore: bool = False) -> None:
+        if len(self._suite_panels) >= _MAX_SUITES:
+            return
+
+        idx = len(self._suite_panels)
+        # Suite 1 shares the app-level config; suites 2-4 get their own config files
+        if idx == 0:
+            cfg = self._config
         else:
-            self._show_suite2()
+            cfg = AppConfig.load(SUITE_CONFIG_PATHS[idx])
+        self._suite_configs.append(cfg)
+
+        frame = ttk.LabelFrame(self._suite_paned, text=f"Suite {idx + 1}")
+        self._suite_paned.add(frame, weight=1)
+
+        panel = TestSuitePanel(frame, config=cfg)
+        panel.pack(fill="both", expand=True, padx=2, pady=2)
+        self._suite_panels.append(panel)
+
+        self._update_suite_buttons()
+
+        if not restore:
+            self._config["suite_count"] = len(self._suite_panels)
+            self._config.save()
+
+    def _remove_suite(self) -> None:
+        if len(self._suite_panels) <= 1:
+            return
+
+        self._suite_panels[-1].cleanup()
+
+        children = self._suite_paned.panes()
+        last_frame = self._suite_paned.nametowidget(children[-1])
+        self._suite_paned.forget(last_frame)
+        last_frame.destroy()
+
+        self._suite_panels.pop()
+        self._suite_configs.pop()
+
+        self._config["suite_count"] = len(self._suite_panels)
         self._config.save()
+        self._update_suite_buttons()
 
-    def _show_suite2(self) -> None:
-        self._paned.add(self._frame2, weight=1)
-        self._suite2_btn.config(text="\uff0d Remove Suite 2")
-        self._config["suite_2_visible"] = True
-
-    def _hide_suite2(self) -> None:
-        self._paned.forget(self._frame2)
-        self._suite2_btn.config(text="\uff0b Add Suite 2")
-        self._config["suite_2_visible"] = False
-
-    def _wire_callbacks(self) -> None:
-        self._conn_panel.on_connect    = self._on_connect_request
-        self._conn_panel.on_disconnect = self._on_disconnect_request
-        self._cmd_panel.on_send        = self._on_send_request
-        self._cmd_panel.set_line_ending_provider(self._conn_panel.get_line_ending)
-
-    # ------------------------------------------------------------------ #
-    #  Queue polling
-    # ------------------------------------------------------------------ #
-
-    def _start_poll(self) -> None:
-        interval = self._config.get("poll_interval_ms", 50)
-        self.root.after(interval, self._poll_queue)
-
-    def _poll_queue(self) -> None:
-        messages = []
-        try:
-            for _ in range(_POLL_MAX):
-                messages.append(self._handler.rx_queue.get_nowait())
-        except queue.Empty:
-            pass
-
-        if messages:
-            self._terminal.batch_append(messages)
-            for msg in messages:
-                self._logger.write(msg)
-            for msg in messages:
-                if msg.direction == Direction.ERROR:
-                    self._handle_error_disconnect()
-                    break
-
-        interval = self._config.get("poll_interval_ms", 50)
-        self.root.after(interval, self._poll_queue)
-
-    # ------------------------------------------------------------------ #
-    #  Connect / disconnect
-    # ------------------------------------------------------------------ #
-
-    def _on_connect_request(self, params: dict) -> None:
-        try:
-            self._handler.connect(**params)
-        except Exception as exc:
-            messagebox.showerror("Connection Failed", str(exc))
-            return
-
-        log_dir = self._config.effective_log_dir()
-        try:
-            log_path = self._logger.open_session(log_dir)
-            self._log_var.set(f"Log: {log_path}")
-        except OSError as exc:
-            self._log_var.set(f"Log: failed ({exc})")
-
-        desc = (
-            f"{params['port']}  {params['baud']},{params['databits']}"
-            f"{params['parity']}{params['stopbits']}"
-        )
-        self._handler.rx_queue.put(
-            TerminalMessage(Direction.INFO, f"Connected — {desc}")
-        )
-        self._status_var.set(f"Connected: {desc}")
-        self._update_ui_state(connected=True)
-        self._save_connection_settings(params)
-
-    def _on_disconnect_request(self) -> None:
-        self._handler.rx_queue.put(
-            TerminalMessage(Direction.INFO, "Disconnected")
-        )
-        self._handler.disconnect()
-        self._logger.close_session()
-        self._status_var.set("Disconnected")
-        self._log_var.set("")
-        self._update_ui_state(connected=False)
-
-    def _handle_error_disconnect(self) -> None:
-        if not self._handler.is_connected:
-            return
-        self._handler.disconnect()
-        self._logger.close_session()
-        self._status_var.set("Disconnected (error)")
-        self._log_var.set("")
-        self._update_ui_state(connected=False)
-
-    def _update_ui_state(self, connected: bool) -> None:
-        self._conn_panel.set_connected(connected)
-        self._cmd_panel.set_enabled(connected)
-
-    def _save_connection_settings(self, params: dict) -> None:
-        self._config["port"]        = params["port"]
-        self._config["baud"]        = params["baud"]
-        self._config["parity"]      = params["parity"]
-        self._config["databits"]    = params["databits"]
-        self._config["stopbits"]    = params["stopbits"]
-        self._config["line_ending"] = self._conn_panel.get_line_ending_key()
-        self._config.save()
-
-    # ------------------------------------------------------------------ #
-    #  Send
-    # ------------------------------------------------------------------ #
-
-    def _on_send_request(self, text: str, line_ending: bytes) -> None:
-        if not self._handler.is_connected:
-            return
-        try:
-            self._handler.send(text, line_ending)
-            self._handler.rx_queue.put(TerminalMessage(Direction.TX, text))
-        except Exception as exc:
-            self._handler.rx_queue.put(
-                TerminalMessage(Direction.ERROR, f"Send failed: {exc}")
-            )
+    def _update_suite_buttons(self) -> None:
+        n = len(self._suite_panels)
+        self._add_suite_btn.config(state="normal" if n < _MAX_SUITES else "disabled")
+        self._remove_suite_btn.config(state="normal" if n > 1 else "disabled")
 
     # ------------------------------------------------------------------ #
     #  Shutdown
     # ------------------------------------------------------------------ #
 
     def _on_closing(self) -> None:
-        self._test_panel.cleanup()
-        self._test_panel2.cleanup()
-        if self._handler.is_connected:
-            self._handler.disconnect()
-        self._logger.close_session()
+        for panel in self._suite_panels:
+            panel.cleanup()
+        for pane in self._panes:
+            pane.cleanup()
+        self._config.set_terminal_count(len(self._panes))
+        self._config["suite_count"] = len(self._suite_panels)
         self._config.save()
         self.root.destroy()

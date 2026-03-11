@@ -14,7 +14,7 @@ venv/
 env/
 
 # App generated files
-config.json
+config*.json
 /serial_logs/
 
 # IDE / OS
@@ -25,3 +25,4 @@ config.json
 Thumbs.db
 .DS_Store
 .mpy-workbench/.mpyignore
+
