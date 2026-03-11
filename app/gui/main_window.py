@@ -82,22 +82,11 @@ class MainWindow:
         self._paned.add(frame1, weight=1)
         # frame2 not added yet — added when user enables it
 
-        self._test_panel = TestSuitePanel(
-            frame1,
-            config=self._config,
-            handler_provider=lambda: self._handler,
-            le_provider=self._conn_panel.get_line_ending,
-        )
+        self._test_panel = TestSuitePanel(frame1, config=self._config)
         self._test_panel.pack(fill="both", expand=True, padx=2, pady=2)
 
-        self._test_panel2 = TestSuitePanel(
-            self._frame2,
-            config=self._config2,
-            handler_provider=lambda: self._handler,
-            le_provider=self._conn_panel.get_line_ending,
-        )
+        self._test_panel2 = TestSuitePanel(self._frame2, config=self._config2)
         self._test_panel2.pack(fill="both", expand=True, padx=2, pady=2)
-        self._test_panel2.set_enabled(False)  # starts disconnected-disabled
 
         # Restore visibility from config
         if self._config.get("suite_2_visible", False):
@@ -149,8 +138,6 @@ class MainWindow:
         self._conn_panel.on_disconnect = self._on_disconnect_request
         self._cmd_panel.on_send        = self._on_send_request
         self._cmd_panel.set_line_ending_provider(self._conn_panel.get_line_ending)
-        self._test_panel.on_run_state_change  = lambda r: self._test_panel2.set_peer_running(r)
-        self._test_panel2.on_run_state_change = lambda r: self._test_panel.set_peer_running(r)
 
     # ------------------------------------------------------------------ #
     #  Queue polling
@@ -231,8 +218,6 @@ class MainWindow:
     def _update_ui_state(self, connected: bool) -> None:
         self._conn_panel.set_connected(connected)
         self._cmd_panel.set_enabled(connected)
-        self._test_panel.set_enabled(connected)
-        self._test_panel2.set_enabled(connected)
 
     def _save_connection_settings(self, params: dict) -> None:
         self._config["port"]        = params["port"]

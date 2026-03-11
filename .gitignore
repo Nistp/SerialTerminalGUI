@@ -24,3 +24,4 @@ config.json
 *~
 Thumbs.db
 .DS_Store
+.mpy-workbench/.mpyignore

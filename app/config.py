@@ -37,6 +37,10 @@ DEFAULTS: dict = {
     "tests": [],
     "trigger_port": "",
     "trigger_baud": 9600,
+    "suite_port":        "",
+    "suite_baud":        115200,
+    "suite_parity":      "N",
+    "suite_line_ending": "CRLF",
     "suite_2_visible": False,
 }
 

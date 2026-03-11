@@ -22,41 +22,52 @@ SerialTerminalGUI/
     ├── logger.py                  # Session file logging to configurable log dir
     ├── test_runner.py             # TestCase / TestResult dataclasses + TestRunner thread
     └── gui/
-        ├── main_window.py         # Integration hub — owns handler, logger, poll loop
-        ├── connection_panel.py    # Port / baud / parity / line-ending controls + log folder selector
+        ├── main_window.py         # Integration hub — owns main terminal handler, logger, poll loop
+        ├── connection_panel.py    # Port / baud / parity / line-ending controls + log folder (Terminal tab only)
         ├── terminal_panel.py      # Dark scrolled terminal with colour-coded TX/RX
         ├── command_panel.py       # Command entry + Up/Down history + special-char buttons (ESC/TAB/^C)
-        └── test_suite_panel.py   # Test CRUD, treeview with live result column, runner
+        └── test_suite_panel.py   # Test CRUD, treeview, runner; owns its own SerialHandler per suite
 ```
 
 ## Architecture — key decisions
 
 ### Threading model
-- `SerialHandler` runs one daemon reader thread (`_read_loop`) that reads bytes from the port and splits on `\n`.
+- Each `SerialHandler` instance runs one daemon reader thread (`_read_loop`) that reads bytes from the port and splits on `\n`.
 - The reader thread **only** calls `queue.put()` — it never touches any Tkinter object.
-- `MainWindow._poll_queue()` is rescheduled every 50 ms via `root.after()` and drains the queue, calling `terminal_panel.batch_append()` and `logger.write()` for each message.
-- The `after()` poll loop is **never cancelled** — it runs even when disconnected (queue is just empty).
+- `MainWindow._poll_queue()` drains the **main terminal handler's** `rx_queue` every 50 ms via `root.after()`, calling `terminal_panel.batch_append()` and `logger.write()`.
+- Each `TestSuitePanel` runs its own `_poll_suite_queue()` loop (also 50 ms) draining its own suite handler's `rx_queue` into the per-suite mini-log widget. This loop starts at widget creation and runs forever (idle when disconnected).
+- The `after()` poll loops are **never cancelled** — they run even when disconnected (queues are just empty).
 
 ### TX echo
-TX commands are **not** read back from the serial port. Instead `_on_send_request` immediately puts a `TerminalMessage(Direction.TX, text)` into `rx_queue` before calling `handler.send()`. This gives instant feedback and avoids half-duplex echo issues.
+TX commands are **not** read back from the serial port. Instead `_on_send_request` (in `MainWindow`) immediately puts a `TerminalMessage(Direction.TX, text)` into `rx_queue` before calling `handler.send()`. This gives instant feedback and avoids half-duplex echo issues. Suite test commands are not echoed to the terminal (they go only to the capture queue).
 
 ### Automated test runner
 - `TestRunner` runs in its own daemon thread and communicates results back via `root.after(0, callback)` — never calls widget methods directly.
-- **Capture mode**: before sending a test command `handler.start_capture()` creates a secondary `_capture_queue`. The reader thread writes every incoming message to both `rx_queue` (terminal) and `_capture_queue` (test runner). After the test `handler.stop_capture()` sets `_capture_queue = None`.
-- **Silent navigation commands** (`setup_commands` / `teardown_commands` on `TestCase`): sent via `_execute_silent()` which uses capture mode but **never puts anything into `rx_queue`**. This means menu-navigation steps are invisible in the terminal and absent from the session log.
+- **Capture mode**: before sending a test command `handler.start_capture()` creates a secondary `_capture_queue`. The reader thread writes every incoming message to both `rx_queue` (suite mini-log) and `_capture_queue` (test runner). After the test `handler.stop_capture()` sets `_capture_queue = None`.
+- **Silent navigation commands** (`setup_commands` / `teardown_commands` on `TestCase`): sent via `_execute_silent()` which uses capture mode but **never puts anything into `rx_queue`**. This means menu-navigation steps are invisible in the mini-log and absent from the session log.
 - **Escape expansion**: the token `<ESC>` in setup/teardown/trigger command strings is replaced with `\x1b` before sending, allowing control-character navigation.
 - **Trigger device**: a secondary `SerialHandler` (`_trigger_handler`) owned by `TestSuitePanel`. When connected, `TestRunner.run()` receives it as `trigger_handler`. Before or after setup commands (controlled by `trigger_timing`), the runner calls `_run_trigger_commands()` which fires each `trigger_command` to the trigger port as fire-and-forget (no capture, no response wait, errors silently swallowed). The trigger handler is disconnected in `TestSuitePanel.cleanup()` on window close.
 - **Manual tests** (`manual=True` on `TestCase`): the runner sends the command (if any), then calls `on_manual_input(test)` — a callback scheduled via `root.after(0, …)` — which opens a non-modal verdict dialog in the GUI. The runner thread blocks in a 50 ms polling loop on `_manual_event`, also checking `_stop_event` each tick. When the user clicks OK, `TestSuitePanel` calls `TestRunner.set_manual_result(status, actual)` which stores the result and sets `_manual_event`, unblocking the runner. Capture mode is **not** used for manual tests.
 
+### Per-suite serial connections (independent)
+- Each `TestSuitePanel` **owns** its own `SerialHandler` (`self._suite_handler`). This is entirely separate from the main terminal handler owned by `MainWindow`.
+- The main `ConnectionPanel` (Terminal tab) controls only the main terminal connection. Suite panels have their own **Device Connection** section with port/baud/line-ending controls and a mini connection log.
+- Suites can connect to different ports and **run in parallel** — there is no interlock.
+- The suite handler's `rx_queue` is drained by `_poll_suite_queue()` into a 3-line `tk.Text` mini-log widget at the top of the suite tab. ERROR messages from the reader thread trigger `_handle_suite_error_disconnect()` which disconnects and stops the runner.
+- `cleanup()` on each `TestSuitePanel` disconnects both `_suite_handler` and `_trigger_handler`, and calls `_runner.stop()`.
+
 ### Config persistence
-- `config.json` in the project root stores last-used serial settings, the log folder path, trigger device settings, and the full test suite definition (serialised `TestCase` dicts).
-- `config.json` is in `.gitignore` — it is machine-specific.
-- Config is saved on every successful connect, when the log folder changes, when the trigger device connects, and on clean shutdown. New keys added to `DEFAULTS` in `config.py` are automatically merged, so old config files remain valid.
-- `log_dir` key: empty string means use the default (`~/serial_logs`). `AppConfig.effective_log_dir()` resolves this.
+- `config_1.json` stores Suite 1 state; `config_2.json` stores Suite 2 state. Both share the same `DEFAULTS` schema.
+- Legacy `config.json` is auto-migrated to `config_1.json` on first launch.
+- Config files are in `.gitignore` — they are machine-specific.
+- Config is saved on every successful connect (suite or trigger), when the log folder changes, and on clean shutdown. New keys added to `DEFAULTS` in `config.py` are automatically merged, so old config files remain valid.
+- `log_dir` key: empty string means use the default (`~/serial_logs`). `AppConfig.effective_log_dir()` resolves this. Each suite has its own `log_dir` (set via the Log folder row in the Device Connection section).
+- Suite-specific connection keys: `suite_port`, `suite_baud`, `suite_parity`, `suite_line_ending`.
 - `trigger_port` / `trigger_baud`: last-used trigger device port and baud rate (saved when trigger connects).
+- `suite_2_visible`: persisted in `config_1.json` only; controls whether the Suite 2 pane is shown.
 
 ### CSV output files
-Two CSV files are written to the configured log folder on each test run:
+Two CSV files are written to each suite's configured log folder on each test run:
 
 | File | Written | Format |
 |------|---------|--------|
@@ -68,7 +79,7 @@ In loop mode the per-run CSV accumulates one row per iteration; a new file is on
 ## GUI layout
 
 ```
-ConnectionPanel   (always visible above notebook)
+ConnectionPanel   (always visible above notebook — Terminal tab connection only)
   Row 0: Port / Refresh / Baud
   Row 1: Parity / Data bits / Stop bits / Line ending      [Connect]
   Row 2: Log folder entry                                  [Browse…]
@@ -77,12 +88,18 @@ ttk.Notebook
 │   ├── TerminalPanel   (dark ScrolledText, expands)
 │   └── CommandPanel    (entry + send + history + [ESC] [TAB] [^C] special-char buttons)
 └── Tab 2 "Test Suite"
-    ├── Trigger Device  (Port / Refresh / Baud / [Connect Trigger])
-    ├── Toolbar         (Add / Edit / Delete / Up / Down)
-    ├── Treeview        (✓ | ⚙ | Name | Command | Expected | Terminator | Timeout | Result)
-    ├── Run bar         (Run Selected / Run All / Stop / ↻ Loop / loop interval spinbox / delay spinbox)
-    ├── Results panel   (ScrolledText with coloured background boxes per result)
-    └── Summary bar     (pass count / Export CSV… / Clear Results)
+    ├── [＋ Add Suite 2] toggle button
+    └── ttk.PanedWindow (horizontal, holds Suite 1 and optionally Suite 2)
+        └── Each suite pane (TestSuitePanel) contains:
+            ├── Device Connection  (Port / Refresh / Baud / Line ending / [Connect Device])
+            │                      (mini 3-line connection log)
+            │                      (Log folder entry / [Browse…])
+            ├── Trigger Device     (Port / Refresh / Baud / [Connect Trigger])
+            ├── Toolbar            (Add / Edit / Delete / Up / Down)
+            ├── Treeview           (✓ | ⚙ | Name | Command | Expected | Terminator | Timeout | Result)
+            ├── Run bar            (Run Selected / Run All / Stop / ↻ Loop / loop interval spinbox / delay spinbox)
+            ├── Results panel      (ScrolledText with coloured background boxes per result)
+            └── Summary bar        (pass count / Export CSV… / Clear Results)
 StatusBar             (connection info + current log file path)
 ```
 
@@ -94,6 +111,8 @@ StatusBar             (connection info + current log file path)
 | RX        | `#00FF7F` (spring green) |
 | INFO      | `#FFD700` (gold) |
 | ERROR     | `#FF4444` (red) |
+
+The same colour scheme is used for the per-suite mini connection log.
 
 ## Test result colours
 
@@ -150,8 +169,8 @@ For **manual tests** (`manual=True`), the logic above is skipped entirely — th
 ## Conventions
 
 - All inter-thread communication goes through `queue.Queue` — no shared mutable state.
-- GUI panels communicate with `MainWindow` via plain callback attributes (`on_connect`, `on_send`, etc.) set by `MainWindow._wire_callbacks()`. Panels have no direct import of `SerialHandler`.
-- `test_suite_panel.py` is the only panel that receives a `handler_provider` lambda (not the handler directly) so it can check `is_connected` at run time without holding a stale reference.
+- GUI panels communicate with `MainWindow` via plain callback attributes (`on_connect`, `on_send`, etc.) set by `MainWindow._wire_callbacks()`. The `ConnectionPanel` and `CommandPanel` have no direct import of `SerialHandler`.
+- `TestSuitePanel` owns its `SerialHandler` directly (`self._suite_handler`). There is no `handler_provider` lambda — the suite panel creates, connects, and disconnects its own handler.
 - `_result_map: dict[test_id → (label, status)]` in `TestSuitePanel` persists results across tree repopulations (e.g. after reorder), and is cleared by "Clear Results" or at the start of each new run.
 - `_current_csv_path` in `TestSuitePanel` tracks the active per-run CSV across loop iterations; it is set to `None` when a non-looping run finishes or Stop is pressed, causing the next run to open a fresh file.
 - **Loop interval**: when "↻ Loop" is active and the interval spinbox is > 0, `_on_done` calls `_start_loop_countdown(seconds)` instead of restarting immediately. `_tick_loop_countdown` reschedules itself every 1 s via `self.after(1000, …)`, stores the `after()` ID in `_loop_after_id`, and updates the summary bar with "next run in Xs". When the countdown reaches 0 it calls `_start_run`. Clicking Stop during a countdown cancels the pending `after()` call and re-enables the run buttons immediately.
