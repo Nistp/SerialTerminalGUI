@@ -10,12 +10,24 @@ pip install pyserial
 python main.py
 ```
 
+Run tests with:
+```
+pip install pytest
+python -m pytest
+```
+
 ## File structure
 
 ```
 SerialTerminalGUI/
 ├── main.py                        # Entry point only — DPI fix, load config, start Tk
 ├── requirements.txt               # pyserial>=3.5 (only external dependency)
+├── pytest.ini                     # Test config — testpaths=tests, norecursedirs=app lib
+├── tests/
+│   ├── test_config.py             # AppConfig: load, save, migration, terminal helpers
+│   ├── test_serial_handler.py     # SerialHandler: state, capture mode, read loop
+│   ├── test_logger.py             # SessionLogger: lifecycle, file naming, write format
+│   └── test_runner.py             # Numeric checks, TestCase serialisation, TestRunner execution
 └── app/
     ├── config.py                  # Constants (BAUD_RATES, LINE_ENDINGS, PARITIES…) + JSON persistence
     ├── serial_handler.py          # PySerial wrapper + threaded reader + capture mode
@@ -179,6 +191,22 @@ For automated tests, a result is **PASS** only when **all** of the following hol
 3. Every line in `numeric_checks` evaluates to true.
 
 For **manual tests** (`manual=True`), the logic above is skipped entirely — the status and actual response come directly from the user's dialog input.
+
+## Unit tests
+
+Tests live in `tests/` and require only `pytest` (no hardware). Run with `python -m pytest`.
+
+| File | Module under test | Key scenarios |
+|------|-------------------|---------------|
+| `tests/test_config.py` | `app/config.py` | Load/save round-trip, flat-key migration, `suite_2_visible` migration, `get_terminal_config` copy semantics, `set_terminal_count`, `effective_log_dir` |
+| `tests/test_serial_handler.py` | `app/serial_handler.py` | `TerminalMessage` immutability, `is_connected` state, capture mode queue lifecycle, `send()` raises when disconnected, `_read_loop` via mock serial (line splitting, CR stripping, capture fan-out, error handling, UTF-8 replacement) |
+| `tests/test_logger.py` | `app/logger.py` | `open_session` creates file with correct name pattern, `write` format (ISO timestamp + direction + text), `close_session` resets state, all no-op safety paths |
+| `tests/test_runner.py` | `app/test_runner.py` | `_expand_escapes`, all 6 numeric operators + range + prefix + error cases, `TestCase` to/from dict round-trip, `TestRunner` PASS / FAIL / TIMEOUT / ERROR / stop mid-run / manual verdict / trigger dispatch |
+
+### Testing approach — no real serial port needed
+`FakeSerialHandler` (in `test_runner.py`) subclasses `SerialHandler`, overrides `is_connected` and `send()`. When `send()` is called it injects pre-defined response lines directly into `_capture_queue`, bypassing the read thread entirely. The read loop is tested separately in `test_serial_handler.py` via a `MagicMock` serial object whose `read()` side-effect feeds byte chunks on demand.
+
+GUI modules (`main_window.py`, `terminal_pane.py`, `connection_panel.py`, `terminal_panel.py`, `command_panel.py`, `test_suite_panel.py`) are not unit-tested — they require a Tk event loop and real widget construction. All non-trivial logic in those files delegates to the tested modules above.
 
 ## Conventions
 

@@ -44,6 +44,22 @@ python main.py
 
 `MainWindow` manages a list of `TerminalPane` instances arranged in a horizontal `ttk.PanedWindow`. Each `TerminalPane` owns its own `SerialHandler`, `SessionLogger`, and `after()`-based poll loop — up to 4 panes can run simultaneously on different ports. `TerminalConfigProxy` bridges `ConnectionPanel`'s flat config interface to the per-pane slice stored under `config_1.json → terminals[i]`. Each `TestSuitePanel` similarly owns an independent `SerialHandler` (`_suite_handler`) with its own poll loop, displaying output in a compact mini-log. `TestRunner` executes in a daemon thread; all results come back via `root.after(0, callback)` — no Tkinter calls from threads. All inter-thread data flows through `queue.Queue`. Terminal panes and suite panels share no state and can run concurrently.
 
+## Running tests
+
+```
+pip install pytest
+python -m pytest
+```
+
+185 tests across 4 files — no hardware required (serial I/O is mocked):
+
+| File | What it covers |
+|------|----------------|
+| `tests/test_config.py` | `AppConfig` load/save, config migration, terminal config helpers, log-dir resolution |
+| `tests/test_serial_handler.py` | `SerialHandler` state, capture mode, read-loop byte splitting, error handling |
+| `tests/test_logger.py` | `SessionLogger` open/write/close lifecycle, file naming, log line format |
+| `tests/test_runner.py` | Numeric checks (all operators), `TestCase` serialisation, `TestRunner` PASS/FAIL/TIMEOUT/ERROR/stop/manual/trigger |
+
 ## Config files
 
 | File | Purpose |
