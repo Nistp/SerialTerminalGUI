@@ -18,6 +18,7 @@ python main.py
 - **Trigger device** — fire fire-and-forget commands to a separate port before/after each test (e.g. to simulate external events)
 - **Manual verdict** — pause a run and ask the user to confirm a pass/fail (for tests requiring physical observation)
 - **Log only** — capture and record a command's response without any pass/fail evaluation (status = LOG)
+- **Suite config export/import** — save the current test list to a JSON file and reload it in any suite pane (Export… / Import… buttons in the suite toolbar; import offers replace-or-append)
 
 ## Code map — where to look for what
 
@@ -39,6 +40,7 @@ python main.py
 | Test suite UI — all of it | `app/gui/test_suite_panel.py` | `TestSuitePanel` |
 | Suite device connection (per-suite) | `app/gui/test_suite_panel.py` | `_on_suite_connect_click()`, `_poll_suite_queue()` |
 | Test CRUD dialogs | `app/gui/test_suite_panel.py` | `_open_test_dialog()` |
+| Suite config export / import | `app/gui/test_suite_panel.py` | `_export_suite_config()`, `_import_suite_config()` |
 | Run control, loop, CSV writing | `app/gui/test_suite_panel.py` | `_start_run()`, `_on_done()` |
 
 ## Architecture in one paragraph

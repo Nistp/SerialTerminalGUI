@@ -1,5 +1,6 @@
 import csv
 import datetime
+import json
 import queue
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
@@ -226,6 +227,9 @@ class TestSuitePanel(ttk.Frame):
         ttk.Button(toolbar, text="Delete",  command=self._delete_test).pack(side="left", padx=2)
         ttk.Button(toolbar, text="↑ Up",   command=self._move_up).pack(side="left", padx=2)
         ttk.Button(toolbar, text="↓ Down", command=self._move_down).pack(side="left", padx=2)
+        ttk.Separator(toolbar, orient="vertical").pack(side="left", padx=6, fill="y")
+        ttk.Button(toolbar, text="Export…", command=self._export_suite_config).pack(side="left", padx=2)
+        ttk.Button(toolbar, text="Import…", command=self._import_suite_config).pack(side="left", padx=2)
 
         # --- Treeview ---
         tree_frame = ttk.Frame(self)
@@ -1216,6 +1220,78 @@ class TestSuitePanel(ttk.Frame):
         for iid in self._tree.get_children():
             self._tree.set(iid, "result", "")
             self._tree.item(iid, tags=())
+
+    # ------------------------------------------------------------------ #
+    #  Suite config export / import
+    # ------------------------------------------------------------------ #
+
+    def _export_suite_config(self) -> None:
+        if not self._tests:
+            messagebox.showinfo("Export Suite", "No tests to export.")
+            return
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            initialfile=f"test_suite_{ts}.json",
+            title="Export test suite",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"tests": [t.to_dict() for t in self._tests]}, f, indent=2)
+        except OSError as exc:
+            messagebox.showerror("Export Failed", str(exc))
+
+    def _import_suite_config(self) -> None:
+        path = filedialog.askopenfilename(
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            title="Import test suite",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            messagebox.showerror("Import Failed", f"Could not read file:\n{exc}")
+            return
+
+        raw = data.get("tests") if isinstance(data, dict) else None
+        if not isinstance(raw, list):
+            messagebox.showerror("Import Failed", "File does not contain a valid test suite.")
+            return
+
+        imported = [TestCase.from_dict(d) for d in raw if isinstance(d, dict)]
+        if not imported:
+            messagebox.showinfo("Import Suite", "No tests found in file.")
+            return
+
+        if self._tests:
+            choice = messagebox.askyesnocancel(
+                "Import Suite",
+                f"Import {len(imported)} test(s).\n\n"
+                "Yes  — replace current tests\n"
+                "No   — append to current tests\n"
+                "Cancel — abort",
+            )
+            if choice is None:
+                return
+            if choice:
+                self._tests = imported
+            else:
+                existing_ids = {t.id for t in self._tests}
+                for tc in imported:
+                    if tc.id in existing_ids:
+                        import uuid as _uuid
+                        tc.id = str(_uuid.uuid4())
+                self._tests.extend(imported)
+        else:
+            self._tests = imported
+
+        self._populate_tree()
+        self._save_tests_to_config()
 
     # ------------------------------------------------------------------ #
     #  Persistence

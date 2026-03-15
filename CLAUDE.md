@@ -39,7 +39,7 @@ SerialTerminalGUI/
         ├── connection_panel.py    # Port / baud / parity / line-ending controls + log folder selector
         ├── terminal_panel.py      # Dark scrolled terminal with colour-coded TX/RX
         ├── command_panel.py       # Command entry + Up/Down history + special-char buttons (ESC/TAB/^C)
-        └── test_suite_panel.py   # Test CRUD, treeview, runner; owns its own SerialHandler per suite
+        └── test_suite_panel.py   # Test CRUD, treeview, runner, export/import; owns its own SerialHandler per suite
 ```
 
 ## Architecture — key decisions
@@ -122,7 +122,7 @@ ttk.Notebook
             │                      (mini 3-line connection log)
             │                      (Log folder entry / [Browse…])
             ├── Trigger Device     (Port / Refresh / Baud / [Connect Trigger])
-            ├── Toolbar            (Add / Edit / Delete / Up / Down)
+            ├── Toolbar            (Add / Edit / Delete / Up / Down | Export… / Import…)
             ├── Treeview           (✓ | ⚙ | Name | Command | Expected | Terminator | Timeout | Result)
             ├── Run bar            (Run Selected / Run All / Stop / ↻ Loop / loop interval spinbox / delay spinbox)
             ├── Results panel      (ScrolledText with coloured background boxes per result)
@@ -221,4 +221,5 @@ GUI modules (`main_window.py`, `terminal_pane.py`, `connection_panel.py`, `termi
 - `_current_csv_path` in `TestSuitePanel` tracks the active per-run CSV across loop iterations; it is set to `None` when a non-looping run finishes or Stop is pressed, causing the next run to open a fresh file.
 - **Loop interval**: when "↻ Loop" is active and the interval spinbox is > 0, `_on_done` calls `_start_loop_countdown(seconds)` instead of restarting immediately. `_tick_loop_countdown` reschedules itself every 1 s via `self.after(1000, …)`, stores the `after()` ID in `_loop_after_id`, and updates the summary bar with "next run in Xs". When the countdown reaches 0 it calls `_start_run`. Clicking Stop during a countdown cancels the pending `after()` call and re-enables the run buttons immediately.
 - The Treeview nav column shows `L` when `log_only=True`, `M` when `manual=True`, `⚙` when setup/teardown/trigger commands are present, with combinations like `LM⚙` possible.
+- **Suite config export/import**: `_export_suite_config()` serialises `self._tests` to a JSON file (`{"tests": [...]}`) via `filedialog.asksaveasfilename`. `_import_suite_config()` reads the same format back; when the suite already has tests it asks the user to choose replace or append. On append, any imported test whose `id` collides with an existing one gets a fresh UUID to avoid duplicates. Both methods call `_save_tests_to_config()` after mutating `self._tests`.
 - `CommandPanel` special-char buttons (ESC / TAB / ^C) send a single control character with **no** line ending appended, using `on_send(char, b"")`.
