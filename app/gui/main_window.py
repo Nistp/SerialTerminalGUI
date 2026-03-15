@@ -156,7 +156,12 @@ class MainWindow:
         frame = ttk.LabelFrame(self._suite_paned, text=f"Suite {idx + 1}")
         self._suite_paned.add(frame, weight=1)
 
-        panel = TestSuitePanel(frame, config=cfg)
+        panel = TestSuitePanel(
+            frame,
+            config=cfg,
+            suite_index=idx,
+            on_collapse_toggle=lambda collapsed, f=frame: self._on_suite_collapse(collapsed, f),
+        )
         panel.pack(fill="both", expand=True, padx=2, pady=2)
         self._suite_panels.append(panel)
 
@@ -188,6 +193,13 @@ class MainWindow:
         n = len(self._suite_panels)
         self._add_suite_btn.config(state="normal" if n < _MAX_SUITES else "disabled")
         self._remove_suite_btn.config(state="normal" if n > 1 else "disabled")
+
+    def _on_suite_collapse(self, collapsed: bool, frame: ttk.LabelFrame) -> None:
+        if collapsed:
+            self._suite_paned.pane(frame, weight=0, minsize=50)
+        else:
+            self._suite_paned.pane(frame, weight=1, minsize=1)
+            self._suite_paned.update_idletasks()
 
     # ------------------------------------------------------------------ #
     #  Shutdown

@@ -122,6 +122,7 @@ ttk.Notebook
             │                      (mini 3-line connection log)
             │                      (Log folder entry / [Browse…])
             ├── Trigger Device     (Port / Refresh / Baud / [Connect Trigger])
+            ├── Collapse header    (Suite N label + ◀/▶ toggle button — always visible)
             ├── Toolbar            (Add / Edit / Delete / Up / Down | Export… / Import…)
             ├── Treeview           (✓ | ⚙ | Name | Command | Expected | Terminator | Timeout | Result)
             ├── Run bar            (Run Selected / Run All / Stop / ↻ Loop / loop interval spinbox / delay spinbox)
@@ -222,4 +223,5 @@ GUI modules (`main_window.py`, `terminal_pane.py`, `connection_panel.py`, `termi
 - **Loop interval**: when "↻ Loop" is active and the interval spinbox is > 0, `_on_done` calls `_start_loop_countdown(seconds)` instead of restarting immediately. `_tick_loop_countdown` reschedules itself every 1 s via `self.after(1000, …)`, stores the `after()` ID in `_loop_after_id`, and updates the summary bar with "next run in Xs". When the countdown reaches 0 it calls `_start_run`. Clicking Stop during a countdown cancels the pending `after()` call and re-enables the run buttons immediately.
 - The Treeview nav column shows `L` when `log_only=True`, `M` when `manual=True`, `⚙` when setup/teardown/trigger commands are present, with combinations like `LM⚙` possible.
 - **Suite config export/import**: `_export_suite_config()` serialises `self._tests` to a JSON file (`{"tests": [...]}`) via `filedialog.asksaveasfilename`. `_import_suite_config()` reads the same format back; when the suite already has tests it asks the user to choose replace or append. On append, any imported test whose `id` collides with an existing one gets a fresh UUID to avoid duplicates. Both methods call `_save_tests_to_config()` after mutating `self._tests`.
+- **Collapsible suite panes**: Each `TestSuitePanel` has a slim header row (grid row 0, always visible) containing the suite label and a `◀`/`▶` toggle button. `_collapse()` calls `grid_remove()` on all 7 content widgets (Device Connection, Trigger Device, Toolbar, Treeview, Run bar, Results, Summary bar), fires `on_collapse_toggle(True)` callback → `MainWindow._on_suite_collapse()` sets `paned.pane(frame, weight=0, minsize=50)` to shrink the sash. `_expand()` reverses this with `weight=1, minsize=1` and `update_idletasks()`. Running tests in a collapsed pane are unaffected — `grid_remove` is visual only. Collapsed state is not persisted to config.
 - `CommandPanel` special-char buttons (ESC / TAB / ^C) send a single control character with **no** line ending appended, using `on_send(char, b"")`.

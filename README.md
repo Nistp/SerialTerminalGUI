@@ -19,6 +19,7 @@ python main.py
 - **Manual verdict** — pause a run and ask the user to confirm a pass/fail (for tests requiring physical observation)
 - **Log only** — capture and record a command's response without any pass/fail evaluation (status = LOG)
 - **Suite config export/import** — save the current test list to a JSON file and reload it in any suite pane (Export… / Import… buttons in the suite toolbar; import offers replace-or-append)
+- **Collapsible suite panes** — click the `◀` button in any suite pane header to collapse it to a narrow sliver, freeing horizontal space for the active pane; click `▶` to restore it; tests running in a collapsed pane are unaffected
 
 ## Code map — where to look for what
 

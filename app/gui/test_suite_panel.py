@@ -62,9 +62,13 @@ _RESULT_LABEL = {
 
 
 class TestSuitePanel(ttk.Frame):
-    def __init__(self, parent, config: AppConfig, **kwargs):
+    def __init__(self, parent, config: AppConfig,
+                 suite_index: int = 0, on_collapse_toggle=None, **kwargs):
         super().__init__(parent, **kwargs)
         self._config = config
+        self._suite_index = suite_index
+        self._on_collapse_toggle = on_collapse_toggle
+        self._collapsed: bool = False
         self._suite_handler = SerialHandler()
         self._suite_connected: bool = False
         self._suite_port_map: dict = {}
@@ -90,12 +94,28 @@ class TestSuitePanel(ttk.Frame):
 
     def _setup_ui(self) -> None:
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(3, weight=2)
-        self.rowconfigure(5, weight=1)
+        self.rowconfigure(4, weight=2)
+        self.rowconfigure(6, weight=1)
+
+        # --- Collapse header (row 0, always visible) ---
+        header_row = ttk.Frame(self)
+        header_row.grid(row=0, column=0, sticky="ew", padx=4, pady=(2, 0))
+        header_row.columnconfigure(0, weight=1)
+
+        ttk.Label(
+            header_row,
+            text=f"Suite {self._suite_index + 1}",
+            font=("TkDefaultFont", 9, "bold"),
+        ).grid(row=0, column=0, sticky="w", padx=2)
+
+        self._collapse_btn = ttk.Button(
+            header_row, text="◀", width=2, command=self.toggle_collapse
+        )
+        self._collapse_btn.grid(row=0, column=1, sticky="e", padx=2)
 
         # --- Device Connection ---
         dev_frame = ttk.LabelFrame(self, text="Device Connection")
-        dev_frame.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 0))
+        dev_frame.grid(row=1, column=0, sticky="ew", padx=4, pady=(4, 0))
 
         # Row 0: controls
         ctrl_row = ttk.Frame(dev_frame)
@@ -182,9 +202,11 @@ class TestSuitePanel(ttk.Frame):
         self._refresh_suite_ports()
         self.after(50, self._poll_suite_queue)
 
+        self._dev_frame = dev_frame
+
         # --- Trigger Device ---
         trigger_frame = ttk.LabelFrame(self, text="Trigger Device")
-        trigger_frame.grid(row=1, column=0, sticky="ew", padx=4, pady=(4, 0))
+        trigger_frame.grid(row=2, column=0, sticky="ew", padx=4, pady=(4, 0))
 
         self._trigger_port_var = tk.StringVar()
         self._trigger_baud_var = tk.StringVar(value=str(self._config.get("trigger_baud", 9600)))
@@ -217,10 +239,11 @@ class TestSuitePanel(ttk.Frame):
         self._trigger_connect_btn.pack(side="left", padx=(8, 4))
 
         self._refresh_trigger_ports()
+        self._trigger_frame = trigger_frame
 
         # --- Toolbar ---
         toolbar = ttk.Frame(self)
-        toolbar.grid(row=2, column=0, sticky="ew", padx=4, pady=(4, 0))
+        toolbar.grid(row=3, column=0, sticky="ew", padx=4, pady=(4, 0))
 
         ttk.Button(toolbar, text="+ Add",   command=self._add_test).pack(side="left", padx=2)
         ttk.Button(toolbar, text="Edit",    command=self._edit_test).pack(side="left", padx=2)
@@ -230,10 +253,11 @@ class TestSuitePanel(ttk.Frame):
         ttk.Separator(toolbar, orient="vertical").pack(side="left", padx=6, fill="y")
         ttk.Button(toolbar, text="Export…", command=self._export_suite_config).pack(side="left", padx=2)
         ttk.Button(toolbar, text="Import…", command=self._import_suite_config).pack(side="left", padx=2)
+        self._toolbar_frame = toolbar
 
         # --- Treeview ---
         tree_frame = ttk.Frame(self)
-        tree_frame.grid(row=3, column=0, sticky="nsew", padx=4, pady=4)
+        tree_frame.grid(row=4, column=0, sticky="nsew", padx=4, pady=4)
         tree_frame.columnconfigure(0, weight=1)
         tree_frame.rowconfigure(0, weight=1)
 
@@ -257,10 +281,11 @@ class TestSuitePanel(ttk.Frame):
 
         self._tree.bind("<Double-1>", lambda _: self._edit_test())
         self._tree.bind("<Button-1>", self._on_tree_click)
+        self._tree_frame = tree_frame
 
         # --- Run bar ---
         run_bar = ttk.Frame(self)
-        run_bar.grid(row=4, column=0, sticky="ew", padx=4, pady=2)
+        run_bar.grid(row=5, column=0, sticky="ew", padx=4, pady=2)
 
         self._run_sel_btn = ttk.Button(
             run_bar, text="▶ Run Selected", command=self._run_selected
@@ -289,6 +314,7 @@ class TestSuitePanel(ttk.Frame):
         self._delay_var = tk.StringVar(value=str(self._config.get("test_delay_ms", 200)))
         ttk.Spinbox(run_bar, from_=0, to=10000, increment=50,
                     textvariable=self._delay_var, width=6).pack(side="left", padx=4)
+        self._run_bar_frame = run_bar
 
         # --- Results panel ---
         self._results = scrolledtext.ScrolledText(
@@ -300,19 +326,20 @@ class TestSuitePanel(ttk.Frame):
             height=8,
             relief="flat",
         )
-        self._results.grid(row=5, column=0, sticky="nsew", padx=4, pady=(0, 2))
+        self._results.grid(row=6, column=0, sticky="nsew", padx=4, pady=(0, 2))
         for status, colors in _RESULT_TAGS.items():
             self._results.tag_configure(status, **colors, font=("Courier", 9, "bold"))
         self._results.tag_configure("header", foreground="#AAAAAA")
 
         # --- Summary bar ---
         summary_bar = ttk.Frame(self)
-        summary_bar.grid(row=6, column=0, sticky="ew", padx=4, pady=(0, 4))
+        summary_bar.grid(row=7, column=0, sticky="ew", padx=4, pady=(0, 4))
 
         self._summary_var = tk.StringVar(value="No results yet")
         ttk.Label(summary_bar, textvariable=self._summary_var).pack(side="left")
         ttk.Button(summary_bar, text="Clear Results", command=self._clear_results).pack(side="right")
         ttk.Button(summary_bar, text="Export CSV…", command=self._export_csv).pack(side="right", padx=4)
+        self._summary_bar_frame = summary_bar
 
     # ------------------------------------------------------------------ #
     #  Trigger device helpers
@@ -1220,6 +1247,36 @@ class TestSuitePanel(ttk.Frame):
         for iid in self._tree.get_children():
             self._tree.set(iid, "result", "")
             self._tree.item(iid, tags=())
+
+    # ------------------------------------------------------------------ #
+    #  Collapse / expand
+    # ------------------------------------------------------------------ #
+
+    def toggle_collapse(self) -> None:
+        if self._collapsed:
+            self._expand()
+        else:
+            self._collapse()
+
+    def _collapse(self) -> None:
+        for w in (self._dev_frame, self._trigger_frame, self._toolbar_frame,
+                  self._tree_frame, self._run_bar_frame, self._results,
+                  self._summary_bar_frame):
+            w.grid_remove()
+        self._collapse_btn.config(text="▶")
+        self._collapsed = True
+        if self._on_collapse_toggle:
+            self._on_collapse_toggle(True)
+
+    def _expand(self) -> None:
+        for w in (self._dev_frame, self._trigger_frame, self._toolbar_frame,
+                  self._tree_frame, self._run_bar_frame, self._results,
+                  self._summary_bar_frame):
+            w.grid()
+        self._collapse_btn.config(text="◀")
+        self._collapsed = False
+        if self._on_collapse_toggle:
+            self._on_collapse_toggle(False)
 
     # ------------------------------------------------------------------ #
     #  Suite config export / import
