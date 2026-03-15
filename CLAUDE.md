@@ -22,41 +22,65 @@ SerialTerminalGUI/
     ├── logger.py                  # Session file logging to configurable log dir
     ├── test_runner.py             # TestCase / TestResult dataclasses + TestRunner thread
     └── gui/
-        ├── main_window.py         # Integration hub — owns handler, logger, poll loop
+        ├── main_window.py         # Integration hub — manages list of TerminalPane + Test Suite tab
+        ├── terminal_pane.py       # Self-contained terminal (ConnectionPanel + TerminalPanel + CommandPanel + own handler)
         ├── connection_panel.py    # Port / baud / parity / line-ending controls + log folder selector
         ├── terminal_panel.py      # Dark scrolled terminal with colour-coded TX/RX
         ├── command_panel.py       # Command entry + Up/Down history + special-char buttons (ESC/TAB/^C)
-        └── test_suite_panel.py   # Test CRUD, treeview with live result column, runner
+        └── test_suite_panel.py   # Test CRUD, treeview, runner; owns its own SerialHandler per suite
 ```
 
 ## Architecture — key decisions
 
 ### Threading model
-- `SerialHandler` runs one daemon reader thread (`_read_loop`) that reads bytes from the port and splits on `\n`.
+- Each `SerialHandler` instance runs one daemon reader thread (`_read_loop`) that reads bytes from the port and splits on `\n`.
 - The reader thread **only** calls `queue.put()` — it never touches any Tkinter object.
-- `MainWindow._poll_queue()` is rescheduled every 50 ms via `root.after()` and drains the queue, calling `terminal_panel.batch_append()` and `logger.write()` for each message.
-- The `after()` poll loop is **never cancelled** — it runs even when disconnected (queue is just empty).
+- Each `TerminalPane` runs its own `_poll_queue()` loop every 50 ms via `self.after()`, draining its handler's `rx_queue` into its `TerminalPanel` and `SessionLogger`. Up to 4 loops run simultaneously (one per open terminal pane).
+- Each `TestSuitePanel` runs its own `_poll_suite_queue()` loop (also 50 ms) draining its suite handler's `rx_queue` into the per-suite mini-log widget. This loop starts at widget creation and runs forever (idle when disconnected).
+- The `after()` poll loops are **never cancelled** — they run even when disconnected (queues are just empty). When a `TerminalPane` widget is destroyed (terminal removed), Tk automatically cancels its pending `after` callbacks.
 
 ### TX echo
-TX commands are **not** read back from the serial port. Instead `_on_send_request` immediately puts a `TerminalMessage(Direction.TX, text)` into `rx_queue` before calling `handler.send()`. This gives instant feedback and avoids half-duplex echo issues.
+TX commands are **not** read back from the serial port. Instead `_on_send_request` (in `TerminalPane`) immediately puts a `TerminalMessage(Direction.TX, text)` into `rx_queue` before calling `handler.send()`. This gives instant feedback and avoids half-duplex echo issues. Suite test commands are not echoed to the terminal (they go only to the capture queue).
 
 ### Automated test runner
 - `TestRunner` runs in its own daemon thread and communicates results back via `root.after(0, callback)` — never calls widget methods directly.
-- **Capture mode**: before sending a test command `handler.start_capture()` creates a secondary `_capture_queue`. The reader thread writes every incoming message to both `rx_queue` (terminal) and `_capture_queue` (test runner). After the test `handler.stop_capture()` sets `_capture_queue = None`.
-- **Silent navigation commands** (`setup_commands` / `teardown_commands` on `TestCase`): sent via `_execute_silent()` which uses capture mode but **never puts anything into `rx_queue`**. This means menu-navigation steps are invisible in the terminal and absent from the session log.
+- **Capture mode**: before sending a test command `handler.start_capture()` creates a secondary `_capture_queue`. The reader thread writes every incoming message to both `rx_queue` (suite mini-log) and `_capture_queue` (test runner). After the test `handler.stop_capture()` sets `_capture_queue = None`.
+- **Silent navigation commands** (`setup_commands` / `teardown_commands` on `TestCase`): sent via `_execute_silent()` which uses capture mode but **never puts anything into `rx_queue`**. This means menu-navigation steps are invisible in the mini-log and absent from the session log.
 - **Escape expansion**: the token `<ESC>` in setup/teardown/trigger command strings is replaced with `\x1b` before sending, allowing control-character navigation.
 - **Trigger device**: a secondary `SerialHandler` (`_trigger_handler`) owned by `TestSuitePanel`. When connected, `TestRunner.run()` receives it as `trigger_handler`. Before or after setup commands (controlled by `trigger_timing`), the runner calls `_run_trigger_commands()` which fires each `trigger_command` to the trigger port as fire-and-forget (no capture, no response wait, errors silently swallowed). The trigger handler is disconnected in `TestSuitePanel.cleanup()` on window close.
 - **Manual tests** (`manual=True` on `TestCase`): the runner sends the command (if any), then calls `on_manual_input(test)` — a callback scheduled via `root.after(0, …)` — which opens a non-modal verdict dialog in the GUI. The runner thread blocks in a 50 ms polling loop on `_manual_event`, also checking `_stop_event` each tick. When the user clicks OK, `TestSuitePanel` calls `TestRunner.set_manual_result(status, actual)` which stores the result and sets `_manual_event`, unblocking the runner. Capture mode is **not** used for manual tests.
 
+### Multiple independent terminals
+- The Terminal tab contains up to **4 independent terminal panes**, each in its own column inside a horizontal `ttk.PanedWindow`.
+- `＋ Add Terminal` / `－ Remove Terminal` buttons in the toolbar at the top of the Terminal tab add or remove the rightmost pane. Terminal 1 always exists; the buttons disable at the limits (1 and 4).
+- Each pane is a `TerminalPane` widget (`app/gui/terminal_pane.py`) that owns its own `SerialHandler`, `SessionLogger`, `ConnectionPanel`, `TerminalPanel`, and `CommandPanel`. Panes are fully independent and can connect to different ports simultaneously.
+- `MainWindow` keeps a `_panes: list` of `TerminalPane` instances and delegates all connection, send, and log management to each pane.
+- `TerminalConfigProxy` (defined in `terminal_pane.py`) wraps `AppConfig` + a terminal index so that `ConnectionPanel` reads and writes `config_1.json → terminals[index]` rather than the root config. Non-terminal keys (autoscroll, font_size, etc.) fall through to the shared app config.
+- When a terminal is removed, `pane.cleanup()` disconnects the handler and closes the logger before the widget is destroyed.
+
+### Multiple independent suites
+- The Test Suite tab contains up to **4 independent suite panes** in a horizontal `ttk.PanedWindow`, managed the same way as terminal panes.
+- `＋ Add Suite` / `－ Remove Suite` buttons in the toolbar add or remove the rightmost pane. Suite 1 always exists; the buttons disable at the limits (1 and 4).
+- `MainWindow` keeps `_suite_panels: list[TestSuitePanel]` and `_suite_configs: list[AppConfig]`. Suite 1 shares `self._config` (`config_1.json`); Suites 2–4 get their own `AppConfig` instances loaded from `config_2.json` / `config_3.json` / `config_4.json` on demand.
+- `suite_count` in `config_1.json` persists how many suites were open. Migrated from the old `suite_2_visible` boolean on first launch.
+- Each `TestSuitePanel` **owns** its own `SerialHandler` (`self._suite_handler`). Suite panels have their own **Device Connection** section and can connect to different ports and **run in parallel** — there is no interlock.
+- The suite handler's `rx_queue` is drained by `_poll_suite_queue()` into a 3-line `tk.Text` mini-log widget at the top of the suite tab. ERROR messages from the reader thread trigger `_handle_suite_error_disconnect()` which disconnects and stops the runner.
+- `cleanup()` on each `TestSuitePanel` disconnects both `_suite_handler` and `_trigger_handler`, and calls `_runner.stop()`.
+
 ### Config persistence
-- `config.json` in the project root stores last-used serial settings, the log folder path, trigger device settings, and the full test suite definition (serialised `TestCase` dicts).
-- `config.json` is in `.gitignore` — it is machine-specific.
-- Config is saved on every successful connect, when the log folder changes, when the trigger device connects, and on clean shutdown. New keys added to `DEFAULTS` in `config.py` are automatically merged, so old config files remain valid.
-- `log_dir` key: empty string means use the default (`~/serial_logs`). `AppConfig.effective_log_dir()` resolves this.
+- `config_1.json` stores terminal pane settings, Suite 1 test state, app-level display settings, and `suite_count`. `config_2.json` / `config_3.json` / `config_4.json` store Suite 2–4 state and are only created when those suites are opened.
+- Legacy `config.json` is auto-migrated to `config_1.json` on first launch.
+- Old flat terminal keys (`port`, `baud`, etc.) are one-time migrated into `terminals[0]`; old `suite_2_visible` is migrated to `suite_count` (1 or 2) on first launch.
+- Config files are in `.gitignore` — they are machine-specific.
+- Config is saved on every successful connect (terminal or suite or trigger), when the log folder changes, when terminals or suites are added/removed, and on clean shutdown.
+- `terminals` key in `config_1.json`: a list of per-terminal dicts, one entry per open terminal pane. Schema defined by `TERMINAL_DEFAULTS` in `config.py`. `AppConfig.get_terminal_config(i)` / `save_terminal_config(i, values)` / `set_terminal_count(n)` manage this list.
+- `suite_count` key in `config_1.json`: integer 1–4, number of suite panes to restore on launch.
+- `log_dir` inside each terminal dict: empty string means `~/serial_logs`. `AppConfig.effective_log_dir_for(terminal_cfg)` resolves it.
+- Suite-specific connection keys (per suite config): `suite_port`, `suite_baud`, `suite_parity`, `suite_line_ending`.
 - `trigger_port` / `trigger_baud`: last-used trigger device port and baud rate (saved when trigger connects).
 
 ### CSV output files
-Two CSV files are written to the configured log folder on each test run:
+Two CSV files are written to each suite's configured log folder on each test run:
 
 | File | Written | Format |
 |------|---------|--------|
@@ -68,22 +92,29 @@ In loop mode the per-run CSV accumulates one row per iteration; a new file is on
 ## GUI layout
 
 ```
-ConnectionPanel   (always visible above notebook)
-  Row 0: Port / Refresh / Baud
-  Row 1: Parity / Data bits / Stop bits / Line ending      [Connect]
-  Row 2: Log folder entry                                  [Browse…]
 ttk.Notebook
 ├── Tab 1 "Terminal"
-│   ├── TerminalPanel   (dark ScrolledText, expands)
-│   └── CommandPanel    (entry + send + history + [ESC] [TAB] [^C] special-char buttons)
+│   ├── Toolbar   [＋ Add Terminal]  [－ Remove Terminal]   (max 4 panes)
+│   └── ttk.PanedWindow (horizontal, holds 1–4 TerminalPane columns)
+│       └── Each TerminalPane contains:
+│           ├── ConnectionPanel  (Port / Refresh / Baud / Parity / Data bits / Stop bits / Line ending / Log folder)
+│           │                    [Connect]  [Browse…]
+│           ├── TerminalPanel    (dark ScrolledText, expands)
+│           ├── CommandPanel     (entry + send + history + [ESC] [TAB] [^C])
+│           └── Status bar       (connection info left  |  log file path right)
 └── Tab 2 "Test Suite"
-    ├── Trigger Device  (Port / Refresh / Baud / [Connect Trigger])
-    ├── Toolbar         (Add / Edit / Delete / Up / Down)
-    ├── Treeview        (✓ | ⚙ | Name | Command | Expected | Terminator | Timeout | Result)
-    ├── Run bar         (Run Selected / Run All / Stop / ↻ Loop / loop interval spinbox / delay spinbox)
-    ├── Results panel   (ScrolledText with coloured background boxes per result)
-    └── Summary bar     (pass count / Export CSV… / Clear Results)
-StatusBar             (connection info + current log file path)
+    ├── Toolbar   [＋ Add Suite]  [－ Remove Suite]   (max 4 panes)
+    └── ttk.PanedWindow (horizontal, holds 1–4 TestSuitePanel columns)
+        └── Each suite pane (TestSuitePanel) contains:
+            ├── Device Connection  (Port / Refresh / Baud / Line ending / [Connect Device])
+            │                      (mini 3-line connection log)
+            │                      (Log folder entry / [Browse…])
+            ├── Trigger Device     (Port / Refresh / Baud / [Connect Trigger])
+            ├── Toolbar            (Add / Edit / Delete / Up / Down)
+            ├── Treeview           (✓ | ⚙ | Name | Command | Expected | Terminator | Timeout | Result)
+            ├── Run bar            (Run Selected / Run All / Stop / ↻ Loop / loop interval spinbox / delay spinbox)
+            ├── Results panel      (ScrolledText with coloured background boxes per result)
+            └── Summary bar        (pass count / Export CSV… / Clear Results)
 ```
 
 ## Terminal colour scheme
@@ -94,6 +125,8 @@ StatusBar             (connection info + current log file path)
 | RX        | `#00FF7F` (spring green) |
 | INFO      | `#FFD700` (gold) |
 | ERROR     | `#FF4444` (red) |
+
+The same colour scheme is used for the per-suite mini connection log.
 
 ## Test result colours
 
@@ -150,8 +183,9 @@ For **manual tests** (`manual=True`), the logic above is skipped entirely — th
 ## Conventions
 
 - All inter-thread communication goes through `queue.Queue` — no shared mutable state.
-- GUI panels communicate with `MainWindow` via plain callback attributes (`on_connect`, `on_send`, etc.) set by `MainWindow._wire_callbacks()`. Panels have no direct import of `SerialHandler`.
-- `test_suite_panel.py` is the only panel that receives a `handler_provider` lambda (not the handler directly) so it can check `is_connected` at run time without holding a stale reference.
+- `TerminalPane` wires its own callbacks internally (`_wire_callbacks`). `MainWindow` has no connect/send/disconnect logic — it only manages which panes exist.
+- `TerminalConfigProxy` (in `terminal_pane.py`) is the bridge between a flat config-like interface (expected by `ConnectionPanel`) and the per-terminal slice in `AppConfig.terminals[i]`. It must cover every `self._config` call made by `ConnectionPanel`, `TerminalPanel`, and `CommandPanel`.
+- `TestSuitePanel` owns its `SerialHandler` directly (`self._suite_handler`). There is no `handler_provider` lambda — the suite panel creates, connects, and disconnects its own handler.
 - `_result_map: dict[test_id → (label, status)]` in `TestSuitePanel` persists results across tree repopulations (e.g. after reorder), and is cleared by "Clear Results" or at the start of each new run.
 - `_current_csv_path` in `TestSuitePanel` tracks the active per-run CSV across loop iterations; it is set to `None` when a non-looping run finishes or Stop is pressed, causing the next run to open a fresh file.
 - **Loop interval**: when "↻ Loop" is active and the interval spinbox is > 0, `_on_done` calls `_start_loop_countdown(seconds)` instead of restarting immediately. `_tick_loop_countdown` reschedules itself every 1 s via `self.after(1000, …)`, stores the `after()` ID in `_loop_after_id`, and updates the summary bar with "next run in Xs". When the countdown reaches 0 it calls `_start_run`. Clicking Stop during a countdown cancels the pending `after()` call and re-enables the run buttons immediately.

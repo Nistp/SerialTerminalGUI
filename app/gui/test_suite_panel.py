@@ -1,11 +1,12 @@
 import csv
 import datetime
+import queue
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
-from typing import Callable, List, Optional
+from typing import List, Optional
 
-from app.config import AppConfig
-from app.serial_handler import SerialHandler
+from app.config import AppConfig, BAUD_RATES, LINE_ENDINGS
+from app.serial_handler import Direction, SerialHandler, TerminalMessage
 from app.test_runner import TestCase, TestResult, TestRunner
 
 # background / foreground for each result box
@@ -57,14 +58,12 @@ _RESULT_LABEL = {
 
 
 class TestSuitePanel(ttk.Frame):
-    def __init__(self, parent, config: AppConfig,
-                 handler_provider: Callable[[], SerialHandler],
-                 le_provider: Callable[[], bytes],
-                 **kwargs):
+    def __init__(self, parent, config: AppConfig, **kwargs):
         super().__init__(parent, **kwargs)
         self._config = config
-        self._handler_provider = handler_provider
-        self._le_provider = le_provider
+        self._suite_handler = SerialHandler()
+        self._suite_connected: bool = False
+        self._suite_port_map: dict = {}
         self._tests: List[TestCase] = []
         self._runner = TestRunner()
         self._pass_count = 0
@@ -87,15 +86,101 @@ class TestSuitePanel(ttk.Frame):
 
     def _setup_ui(self) -> None:
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(2, weight=2)
-        self.rowconfigure(4, weight=1)
+        self.rowconfigure(3, weight=2)
+        self.rowconfigure(5, weight=1)
+
+        # --- Device Connection ---
+        dev_frame = ttk.LabelFrame(self, text="Device Connection")
+        dev_frame.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 0))
+
+        # Row 0: controls
+        ctrl_row = ttk.Frame(dev_frame)
+        ctrl_row.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 2))
+
+        self._suite_port_var   = tk.StringVar()
+        self._suite_baud_var   = tk.StringVar(value=str(self._config.get("suite_baud", 115200)))
+        self._suite_le_var     = tk.StringVar(value=self._config.get("suite_line_ending", "CRLF"))
+        self._suite_log_dir_var = tk.StringVar(value=self._config.get("log_dir", ""))
+
+        ttk.Label(ctrl_row, text="Port:").pack(side="left", padx=(0, 2))
+        self._suite_port_combo = ttk.Combobox(
+            ctrl_row, textvariable=self._suite_port_var, width=14, state="readonly"
+        )
+        self._suite_port_combo.pack(side="left", padx=2)
+
+        ttk.Button(ctrl_row, text="⟳", width=2,
+                   command=self._refresh_suite_ports).pack(side="left", padx=2)
+
+        ttk.Label(ctrl_row, text="Baud:").pack(side="left", padx=(8, 2))
+        self._suite_baud_combo = ttk.Combobox(
+            ctrl_row,
+            textvariable=self._suite_baud_var,
+            values=[str(b) for b in BAUD_RATES],
+            width=9,
+            state="readonly",
+        )
+        self._suite_baud_combo.pack(side="left", padx=2)
+
+        ttk.Label(ctrl_row, text="Line ending:").pack(side="left", padx=(8, 2))
+        self._suite_le_combo = ttk.Combobox(
+            ctrl_row,
+            textvariable=self._suite_le_var,
+            values=list(LINE_ENDINGS.keys()),
+            width=6,
+            state="readonly",
+        )
+        self._suite_le_combo.pack(side="left", padx=2)
+
+        self._suite_connect_btn = ttk.Button(
+            ctrl_row, text="Connect Device", command=self._on_suite_connect_click
+        )
+        self._suite_connect_btn.pack(side="left", padx=(8, 4))
+
+        # Row 1: mini connection log
+        log_row = ttk.Frame(dev_frame)
+        log_row.grid(row=1, column=0, sticky="ew", padx=4, pady=(0, 4))
+        log_row.columnconfigure(0, weight=1)
+
+        self._suite_log = tk.Text(
+            log_row,
+            height=3,
+            state="disabled",
+            bg="#1C1C1C",
+            fg="#E0E0E0",
+            font=("Courier", 8),
+            relief="flat",
+            wrap="word",
+        )
+        self._suite_log.grid(row=0, column=0, sticky="ew")
+        suite_log_sb = ttk.Scrollbar(log_row, orient="vertical", command=self._suite_log.yview)
+        self._suite_log.configure(yscrollcommand=suite_log_sb.set)
+        suite_log_sb.grid(row=0, column=1, sticky="ns")
+
+        # Colour tags matching terminal scheme
+        self._suite_log.tag_configure("TX",    foreground="#00BFFF")
+        self._suite_log.tag_configure("RX",    foreground="#00FF7F")
+        self._suite_log.tag_configure("INFO",  foreground="#FFD700")
+        self._suite_log.tag_configure("ERROR", foreground="#FF4444")
+
+        # Row 2: log folder
+        log_dir_row = ttk.Frame(dev_frame)
+        log_dir_row.grid(row=2, column=0, sticky="ew", padx=4, pady=(0, 4))
+        log_dir_row.columnconfigure(1, weight=1)
+
+        ttk.Label(log_dir_row, text="Log folder:").grid(row=0, column=0, sticky="e", padx=(0, 4))
+        self._suite_log_dir_entry = ttk.Entry(log_dir_row, textvariable=self._suite_log_dir_var)
+        self._suite_log_dir_entry.grid(row=0, column=1, sticky="ew", padx=2)
+        self._suite_log_dir_entry.bind("<FocusOut>", self._on_suite_log_dir_change)
+        self._suite_log_dir_entry.bind("<Return>",   self._on_suite_log_dir_change)
+        ttk.Button(log_dir_row, text="Browse…",
+                   command=self._browse_suite_log_dir).grid(row=0, column=2, padx=(2, 0))
+
+        self._refresh_suite_ports()
+        self.after(50, self._poll_suite_queue)
 
         # --- Trigger Device ---
-        from app.serial_handler import list_serial_ports
-        from app.config import BAUD_RATES
-
         trigger_frame = ttk.LabelFrame(self, text="Trigger Device")
-        trigger_frame.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 0))
+        trigger_frame.grid(row=1, column=0, sticky="ew", padx=4, pady=(4, 0))
 
         self._trigger_port_var = tk.StringVar()
         self._trigger_baud_var = tk.StringVar(value=str(self._config.get("trigger_baud", 9600)))
@@ -131,7 +216,7 @@ class TestSuitePanel(ttk.Frame):
 
         # --- Toolbar ---
         toolbar = ttk.Frame(self)
-        toolbar.grid(row=1, column=0, sticky="ew", padx=4, pady=(4, 0))
+        toolbar.grid(row=2, column=0, sticky="ew", padx=4, pady=(4, 0))
 
         ttk.Button(toolbar, text="+ Add",   command=self._add_test).pack(side="left", padx=2)
         ttk.Button(toolbar, text="Edit",    command=self._edit_test).pack(side="left", padx=2)
@@ -141,7 +226,7 @@ class TestSuitePanel(ttk.Frame):
 
         # --- Treeview ---
         tree_frame = ttk.Frame(self)
-        tree_frame.grid(row=2, column=0, sticky="nsew", padx=4, pady=4)
+        tree_frame.grid(row=3, column=0, sticky="nsew", padx=4, pady=4)
         tree_frame.columnconfigure(0, weight=1)
         tree_frame.rowconfigure(0, weight=1)
 
@@ -168,7 +253,7 @@ class TestSuitePanel(ttk.Frame):
 
         # --- Run bar ---
         run_bar = ttk.Frame(self)
-        run_bar.grid(row=3, column=0, sticky="ew", padx=4, pady=2)
+        run_bar.grid(row=4, column=0, sticky="ew", padx=4, pady=2)
 
         self._run_sel_btn = ttk.Button(
             run_bar, text="▶ Run Selected", command=self._run_selected
@@ -208,21 +293,19 @@ class TestSuitePanel(ttk.Frame):
             height=8,
             relief="flat",
         )
-        self._results.grid(row=4, column=0, sticky="nsew", padx=4, pady=(0, 2))
+        self._results.grid(row=5, column=0, sticky="nsew", padx=4, pady=(0, 2))
         for status, colors in _RESULT_TAGS.items():
             self._results.tag_configure(status, **colors, font=("Courier", 9, "bold"))
         self._results.tag_configure("header", foreground="#AAAAAA")
 
         # --- Summary bar ---
         summary_bar = ttk.Frame(self)
-        summary_bar.grid(row=5, column=0, sticky="ew", padx=4, pady=(0, 4))
+        summary_bar.grid(row=6, column=0, sticky="ew", padx=4, pady=(0, 4))
 
         self._summary_var = tk.StringVar(value="No results yet")
         ttk.Label(summary_bar, textvariable=self._summary_var).pack(side="left")
         ttk.Button(summary_bar, text="Clear Results", command=self._clear_results).pack(side="right")
         ttk.Button(summary_bar, text="Export CSV…", command=self._export_csv).pack(side="right", padx=4)
-
-        self.set_enabled(False)
 
     # ------------------------------------------------------------------ #
     #  Trigger device helpers
@@ -285,9 +368,130 @@ class TestSuitePanel(ttk.Frame):
             self._trigger_baud_combo.config(state="readonly")
 
     def cleanup(self) -> None:
-        """Disconnect the trigger handler on window close."""
+        """Disconnect handlers and stop runner on window close."""
         if self._trigger_handler.is_connected:
             self._trigger_handler.disconnect()
+        if self._suite_handler.is_connected:
+            self._suite_handler.disconnect()
+        self._runner.stop()
+
+    # ------------------------------------------------------------------ #
+    #  Suite device helpers
+    # ------------------------------------------------------------------ #
+
+    def _refresh_suite_ports(self) -> None:
+        from app.serial_handler import list_serial_ports
+        ports = list_serial_ports()
+        self._suite_port_map = {desc: dev for dev, desc in ports}
+        display_names = [desc for _, desc in ports]
+        self._suite_port_combo["values"] = display_names
+
+        saved = self._config.get("suite_port", "")
+        for dev, desc in ports:
+            if dev == saved:
+                self._suite_port_var.set(desc)
+                return
+        if display_names:
+            self._suite_port_var.set(display_names[0])
+
+    def _on_suite_connect_click(self) -> None:
+        if self._suite_connected:
+            self._suite_handler.disconnect()
+            self._set_suite_connected(False)
+            return
+
+        desc = self._suite_port_var.get()
+        port = self._suite_port_map.get(desc, desc)
+        if not port:
+            messagebox.showwarning("Device Connection", "Select a port first.")
+            return
+        try:
+            baud = int(self._suite_baud_var.get())
+        except ValueError:
+            baud = 115200
+
+        try:
+            self._suite_handler.connect(
+                port=port, baud=baud,
+                parity=self._config.get("suite_parity", "N"),
+                databits=8, stopbits=1,
+            )
+        except Exception as exc:
+            messagebox.showerror("Device Connection", f"Connection failed: {exc}")
+            return
+
+        self._config["suite_port"]        = port
+        self._config["suite_baud"]        = baud
+        self._config["suite_line_ending"] = self._suite_le_var.get()
+        self._config.save()
+
+        desc_str = f"{port}  {baud},8N1"
+        self._suite_handler.rx_queue.put(
+            TerminalMessage(Direction.INFO, f"Connected — {desc_str}")
+        )
+        self._set_suite_connected(True)
+
+    def _set_suite_connected(self, connected: bool) -> None:
+        self._suite_connected = connected
+        if connected:
+            self._suite_connect_btn.config(text="Disconnect Device")
+            self._suite_port_combo.config(state="disabled")
+            self._suite_baud_combo.config(state="disabled")
+            self._suite_le_combo.config(state="disabled")
+            self._run_sel_btn.config(state="normal")
+            self._run_all_btn.config(state="normal")
+        else:
+            self._suite_connect_btn.config(text="Connect Device")
+            self._suite_port_combo.config(state="readonly")
+            self._suite_baud_combo.config(state="readonly")
+            self._suite_le_combo.config(state="readonly")
+            if not self._runner.is_running:
+                self._run_sel_btn.config(state="disabled")
+                self._run_all_btn.config(state="disabled")
+
+    def _poll_suite_queue(self) -> None:
+        _POLL_MAX = 200
+        try:
+            for _ in range(_POLL_MAX):
+                msg = self._suite_handler.rx_queue.get_nowait()
+                self._append_suite_log(msg)
+                if msg.direction == Direction.ERROR:
+                    self._handle_suite_error_disconnect()
+                    break
+        except queue.Empty:
+            pass
+        self.after(50, self._poll_suite_queue)
+
+    def _handle_suite_error_disconnect(self) -> None:
+        if not self._suite_handler.is_connected:
+            return
+        self._suite_handler.disconnect()
+        self._set_suite_connected(False)
+        self._runner.stop()
+
+    def _browse_suite_log_dir(self) -> None:
+        import pathlib
+        current = self._suite_log_dir_var.get().strip() or str(pathlib.Path.home() / "serial_logs")
+        chosen = filedialog.askdirectory(initialdir=current, title="Select log / CSV folder")
+        if chosen:
+            self._suite_log_dir_var.set(chosen)
+            self._on_suite_log_dir_change()
+
+    def _on_suite_log_dir_change(self, *_) -> None:
+        self._config["log_dir"] = self._suite_log_dir_var.get().strip()
+        self._config.save()
+
+    def _append_suite_log(self, msg: TerminalMessage) -> None:
+        tag = msg.direction.name  # "TX", "RX", "INFO", "ERROR"
+        line = f"[{tag}] {msg.text}\n"
+        self._suite_log.config(state="normal")
+        self._suite_log.insert("end", line, tag)
+        # Trim to ~150 lines to prevent unbounded growth
+        line_count = int(self._suite_log.index("end-1c").split(".")[0])
+        if line_count > 150:
+            self._suite_log.delete("1.0", "51.0")
+        self._suite_log.config(state="disabled")
+        self._suite_log.see("end")
 
     # ------------------------------------------------------------------ #
     #  Treeview helpers
@@ -701,9 +905,9 @@ class TestSuitePanel(ttk.Frame):
         self._start_run(tests)
 
     def _start_run(self, tests: List[TestCase]) -> None:
-        handler = self._handler_provider()
+        handler = self._suite_handler
         if not handler.is_connected:
-            messagebox.showwarning("Not Connected", "Connect to a serial port first.")
+            messagebox.showwarning("Not Connected", "Connect the suite device first.")
             return
 
         self._current_run_tests = tests
@@ -760,7 +964,7 @@ class TestSuitePanel(ttk.Frame):
         self._runner.run(
             tests=tests,
             handler=handler,
-            line_ending=self._le_provider(),
+            line_ending=LINE_ENDINGS.get(self._suite_le_var.get(), b"\r\n"),
             on_result=_safe_on_result,
             on_done=_safe_on_done,
             delay_ms=delay_ms,
@@ -1008,13 +1212,3 @@ class TestSuitePanel(ttk.Frame):
         self._tests = [TestCase.from_dict(d) for d in raw if isinstance(d, dict)]
         self._populate_tree()
 
-    # ------------------------------------------------------------------ #
-    #  Enable / disable
-    # ------------------------------------------------------------------ #
-
-    def set_enabled(self, enabled: bool) -> None:
-        state = "normal" if enabled else "disabled"
-        self._run_sel_btn.config(state=state)
-        self._run_all_btn.config(state=state)
-        if not enabled:
-            self._stop_btn.config(state="disabled")
