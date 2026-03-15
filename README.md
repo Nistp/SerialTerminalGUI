@@ -17,6 +17,7 @@ python main.py
 - **Multiple independent suites** — open up to 4 independent suite panes (＋ Add Suite / － Remove Suite); each connects to its own device and runs in parallel
 - **Trigger device** — fire fire-and-forget commands to a separate port before/after each test (e.g. to simulate external events)
 - **Manual verdict** — pause a run and ask the user to confirm a pass/fail (for tests requiring physical observation)
+- **Log only** — capture and record a command's response without any pass/fail evaluation (status = LOG)
 
 ## Code map — where to look for what
 
@@ -51,14 +52,14 @@ pip install pytest
 python -m pytest
 ```
 
-185 tests across 4 files — no hardware required (serial I/O is mocked):
+193 tests across 4 files — no hardware required (serial I/O is mocked):
 
 | File | What it covers |
 |------|----------------|
 | `tests/test_config.py` | `AppConfig` load/save, config migration, terminal config helpers, log-dir resolution |
 | `tests/test_serial_handler.py` | `SerialHandler` state, capture mode, read-loop byte splitting, error handling |
 | `tests/test_logger.py` | `SessionLogger` open/write/close lifecycle, file naming, log line format |
-| `tests/test_runner.py` | Numeric checks (all operators), `TestCase` serialisation, `TestRunner` PASS/FAIL/TIMEOUT/ERROR/stop/manual/trigger |
+| `tests/test_runner.py` | Numeric checks (all operators), `TestCase` serialisation, `TestRunner` PASS/FAIL/TIMEOUT/ERROR/LOG/stop/manual/trigger |
 
 ## Config files
 

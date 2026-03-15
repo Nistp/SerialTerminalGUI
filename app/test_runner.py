@@ -122,6 +122,9 @@ class TestCase:
     # If True, the runner pauses and asks the user for the verdict instead of
     # evaluating the response automatically.
     manual: bool = False
+    # If True, the response is captured and recorded as-is (status = "LOG").
+    # Expected strings, numeric checks, and pass/fail evaluation are skipped.
+    log_only: bool = False
     # Navigation commands executed silently before/after the test command.
     # They are NOT echoed to the terminal and NOT written to the session log.
     setup_commands: List[str] = field(default_factory=list)
@@ -152,6 +155,7 @@ class TestCase:
             "numeric_checks": self.numeric_checks,
             "trigger_commands": self.trigger_commands,
             "trigger_timing": self.trigger_timing,
+            "log_only": self.log_only,
         }
 
     @classmethod
@@ -171,13 +175,14 @@ class TestCase:
             numeric_checks=d.get("numeric_checks", ""),
             trigger_commands=d.get("trigger_commands", []),
             trigger_timing=d.get("trigger_timing", "before_setup"),
+            log_only=bool(d.get("log_only", False)),
         )
 
 
 @dataclass
 class TestResult:
     test: TestCase
-    status: str          # "PASS" | "FAIL" | "TIMEOUT" | "ERROR"
+    status: str          # "PASS" | "FAIL" | "TIMEOUT" | "ERROR" | "LOG"
     actual: str          # all lines received, joined with newlines
     duration_ms: float
 
@@ -443,6 +448,16 @@ class TestRunner:
         handler.stop_capture()
         duration_ms = (time.monotonic() - t_start) * 1000.0
         actual = "\n".join(collected_lines)
+
+        # Log-only: skip all pass/fail evaluation and return captured response
+        if test.log_only:
+            for cmd in test.teardown_commands:
+                if cmd.strip():
+                    self._execute_silent(
+                        cmd.strip(), handler, line_ending,
+                        test.terminator, test.nav_timeout_ms,
+                    )
+            return TestResult(test=test, status="LOG", actual=actual, duration_ms=duration_ms)
 
         if not terminator_found and test.terminator:
             status = "TIMEOUT"

@@ -167,6 +167,7 @@ Used in both the Treeview row foreground and the results panel background boxes.
 | `trigger_commands` | `[]`            | Commands sent fire-and-forget to the trigger port (no response waited) |
 | `trigger_timing`   | `"before_setup"`| When to fire trigger: `"before_setup"` or `"after_setup"` |
 | `manual`           | `False`         | If `True`, runner pauses after sending the command and shows a dialog asking the user to choose PASS/FAIL and enter the actual response |
+| `log_only`         | `False`         | If `True`, response is captured and returned with status `"LOG"` — all pass/fail evaluation (expected, numeric checks, terminator) is skipped |
 | `enabled`          | `True`          | Included in "Run All" when checked |
 | `id`               | uuid4           | Stable identifier used as Treeview iid |
 
@@ -192,6 +193,8 @@ For automated tests, a result is **PASS** only when **all** of the following hol
 
 For **manual tests** (`manual=True`), the logic above is skipped entirely — the status and actual response come directly from the user's dialog input.
 
+For **log-only tests** (`log_only=True`), the command is sent and the response is captured up to the terminator (or timeout), but **no** pass/fail evaluation is performed. The result status is always `"LOG"`. The response is still shown in the results panel (muted blue) and written to CSV.
+
 ## Unit tests
 
 Tests live in `tests/` and require only `pytest` (no hardware). Run with `python -m pytest`.
@@ -201,7 +204,7 @@ Tests live in `tests/` and require only `pytest` (no hardware). Run with `python
 | `tests/test_config.py` | `app/config.py` | Load/save round-trip, flat-key migration, `suite_2_visible` migration, `get_terminal_config` copy semantics, `set_terminal_count`, `effective_log_dir` |
 | `tests/test_serial_handler.py` | `app/serial_handler.py` | `TerminalMessage` immutability, `is_connected` state, capture mode queue lifecycle, `send()` raises when disconnected, `_read_loop` via mock serial (line splitting, CR stripping, capture fan-out, error handling, UTF-8 replacement) |
 | `tests/test_logger.py` | `app/logger.py` | `open_session` creates file with correct name pattern, `write` format (ISO timestamp + direction + text), `close_session` resets state, all no-op safety paths |
-| `tests/test_runner.py` | `app/test_runner.py` | `_expand_escapes`, all 6 numeric operators + range + prefix + error cases, `TestCase` to/from dict round-trip, `TestRunner` PASS / FAIL / TIMEOUT / ERROR / stop mid-run / manual verdict / trigger dispatch |
+| `tests/test_runner.py` | `app/test_runner.py` | `_expand_escapes`, all 6 numeric operators + range + prefix + error cases, `TestCase` to/from dict round-trip, `TestRunner` PASS / FAIL / TIMEOUT / ERROR / LOG / stop mid-run / manual verdict / trigger dispatch |
 
 ### Testing approach — no real serial port needed
 `FakeSerialHandler` (in `test_runner.py`) subclasses `SerialHandler`, overrides `is_connected` and `send()`. When `send()` is called it injects pre-defined response lines directly into `_capture_queue`, bypassing the read thread entirely. The read loop is tested separately in `test_serial_handler.py` via a `MagicMock` serial object whose `read()` side-effect feeds byte chunks on demand.
@@ -217,5 +220,5 @@ GUI modules (`main_window.py`, `terminal_pane.py`, `connection_panel.py`, `termi
 - `_result_map: dict[test_id → (label, status)]` in `TestSuitePanel` persists results across tree repopulations (e.g. after reorder), and is cleared by "Clear Results" or at the start of each new run.
 - `_current_csv_path` in `TestSuitePanel` tracks the active per-run CSV across loop iterations; it is set to `None` when a non-looping run finishes or Stop is pressed, causing the next run to open a fresh file.
 - **Loop interval**: when "↻ Loop" is active and the interval spinbox is > 0, `_on_done` calls `_start_loop_countdown(seconds)` instead of restarting immediately. `_tick_loop_countdown` reschedules itself every 1 s via `self.after(1000, …)`, stores the `after()` ID in `_loop_after_id`, and updates the summary bar with "next run in Xs". When the countdown reaches 0 it calls `_start_run`. Clicking Stop during a countdown cancels the pending `after()` call and re-enables the run buttons immediately.
-- The Treeview nav column shows `M` when `manual=True`, `⚙` when setup/teardown/trigger commands are present, and `M⚙` when both apply.
+- The Treeview nav column shows `L` when `log_only=True`, `M` when `manual=True`, `⚙` when setup/teardown/trigger commands are present, with combinations like `LM⚙` possible.
 - `CommandPanel` special-char buttons (ESC / TAB / ^C) send a single control character with **no** line ending appended, using `on_send(char, b"")`.

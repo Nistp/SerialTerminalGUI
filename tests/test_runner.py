@@ -246,9 +246,9 @@ class TestTestCaseSerialization:
         tc = self._make_case()
         d = tc.to_dict()
         for key in ("id", "name", "command", "expected", "terminator",
-                    "timeout_ms", "enabled", "manual", "setup_commands",
-                    "teardown_commands", "nav_timeout_ms", "numeric_checks",
-                    "trigger_commands", "trigger_timing"):
+                    "timeout_ms", "enabled", "manual", "log_only",
+                    "setup_commands", "teardown_commands", "nav_timeout_ms",
+                    "numeric_checks", "trigger_commands", "trigger_timing"):
             assert key in d
 
     def test_to_dict_values_match(self):
@@ -283,6 +283,7 @@ class TestTestCaseSerialization:
         assert tc.timeout_ms == 2000
         assert tc.enabled is True
         assert tc.manual is False
+        assert tc.log_only is False
         assert tc.setup_commands == []
         assert tc.teardown_commands == []
         assert tc.nav_timeout_ms == 1000
@@ -694,3 +695,67 @@ class TestTestRunnerTrigger:
                       trigger_commands=["TRIG"])
         _run_sync(TestRunner(), [tc], handler, trigger_handler=trigger)
         assert trigger._send_calls == []
+
+
+# ---------------------------------------------------------------------------
+# TestRunner — log_only tests
+# ---------------------------------------------------------------------------
+
+class TestTestRunnerLogOnly:
+    def test_log_only_returns_log_status(self):
+        handler = FakeSerialHandler(["data line", "OK"])
+        tc = TestCase(name="t", command="AT+LOG", expected="",
+                      terminator="OK", timeout_ms=2000, log_only=True)
+        results = _run_sync(TestRunner(), [tc], handler)
+        assert results[0].status == "LOG"
+
+    def test_log_only_captures_response(self):
+        handler = FakeSerialHandler(["data line", "OK"])
+        tc = TestCase(name="t", command="AT+LOG", expected="",
+                      terminator="OK", timeout_ms=2000, log_only=True)
+        results = _run_sync(TestRunner(), [tc], handler)
+        assert "data line" in results[0].actual
+        assert "OK" in results[0].actual
+
+    def test_log_only_returns_log_even_without_terminator(self):
+        # Even if the terminator is never received, log_only returns LOG not TIMEOUT
+        handler = FakeSerialHandler(["some data"])
+        tc = TestCase(name="t", command="AT+LOG", expected="",
+                      terminator="OK", timeout_ms=200, log_only=True)
+        results = _run_sync(TestRunner(), [tc], handler)
+        assert results[0].status == "LOG"
+
+    def test_log_only_skips_expected_evaluation(self):
+        # expected substring would cause PASS but log_only returns LOG
+        handler = FakeSerialHandler(["expected_string", "OK"])
+        tc = TestCase(name="t", command="AT+LOG", expected="expected_string",
+                      terminator="OK", timeout_ms=2000, log_only=True)
+        results = _run_sync(TestRunner(), [tc], handler)
+        assert results[0].status == "LOG"
+
+    def test_log_only_skips_numeric_checks(self):
+        # numeric check would fail but log_only returns LOG not FAIL
+        handler = FakeSerialHandler(["+VAL: 1", "OK"])
+        tc = TestCase(name="t", command="AT+VAL", expected="",
+                      terminator="OK", timeout_ms=2000,
+                      numeric_checks="+VAL: >= 100",
+                      log_only=True)
+        results = _run_sync(TestRunner(), [tc], handler)
+        assert results[0].status == "LOG"
+
+    def test_log_only_serialization_roundtrip(self):
+        tc = TestCase(name="t", command="cmd", expected="", log_only=True)
+        tc2 = TestCase.from_dict(tc.to_dict())
+        assert tc2.log_only is True
+
+    def test_log_only_defaults_to_false(self):
+        tc = TestCase.from_dict({})
+        assert tc.log_only is False
+
+    def test_log_only_false_still_evaluates(self):
+        # Sanity: log_only=False with missing expected → FAIL, not LOG
+        handler = FakeSerialHandler(["no match", "OK"])
+        tc = TestCase(name="t", command="cmd", expected="expected",
+                      terminator="OK", timeout_ms=2000, log_only=False)
+        results = _run_sync(TestRunner(), [tc], handler)
+        assert results[0].status == "FAIL"

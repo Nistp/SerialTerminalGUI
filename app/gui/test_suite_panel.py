@@ -15,6 +15,7 @@ _RESULT_TAGS = {
     "FAIL":    {"background": "#3B0D0D", "foreground": "#FF5555"},
     "TIMEOUT": {"background": "#3B2D00", "foreground": "#FFD700"},
     "ERROR":   {"background": "#3B1A00", "foreground": "#FF9100"},
+    "LOG":     {"background": "#1A1A3B", "foreground": "#A0A0FF"},
 }
 
 _CHECKBOX_CHECKED = "☑"
@@ -48,12 +49,14 @@ _ROW_TAGS = {
     "FAIL":    {"foreground": "#FF5555"},
     "TIMEOUT": {"foreground": "#FFD700"},
     "ERROR":   {"foreground": "#FF9100"},
+    "LOG":     {"foreground": "#A0A0FF"},
 }
 _RESULT_LABEL = {
     "PASS":    "✔  PASS",
     "FAIL":    "✘  FAIL",
     "TIMEOUT": "⏱  TIMEOUT",
     "ERROR":   "⚠  ERROR",
+    "LOG":     "◉  LOG",
 }
 
 
@@ -501,7 +504,7 @@ class TestSuitePanel(ttk.Frame):
         self._tree.delete(*self._tree.get_children())
         for tc in self._tests:
             has_nav = bool(tc.setup_commands or tc.teardown_commands or tc.trigger_commands)
-            nav_indicator = ("M" if tc.manual else "") + ("⚙" if has_nav else "")
+            nav_indicator = ("L" if tc.log_only else "") + ("M" if tc.manual else "") + ("⚙" if has_nav else "")
             result_entry = self._result_map.get(tc.id)  # (label, status) or None
             result_label = result_entry[0] if result_entry else ""
             result_tag   = result_entry[1] if result_entry else ""
@@ -627,8 +630,20 @@ class TestSuitePanel(ttk.Frame):
             variable=self._manual_var,
         ).grid(row=manual_row, column=1, sticky="w", **pad)
 
+        # --- Log only checkbox ---
+        log_only_row = manual_row + 1
+        self._log_only_var = tk.BooleanVar(value=tc.log_only if tc else False)
+        ttk.Label(dialog, text="Log only:").grid(
+            row=log_only_row, column=0, sticky="e", **pad
+        )
+        ttk.Checkbutton(
+            dialog,
+            text="Record response only — skip pass/fail evaluation",
+            variable=self._log_only_var,
+        ).grid(row=log_only_row, column=1, sticky="w", **pad)
+
         # --- Multiline: expected patterns ---
-        exp_row = len(single_fields) + 1
+        exp_row = len(single_fields) + 2
         ttk.Label(
             dialog,
             text="Expected\n(one per line, all must match):",
@@ -796,7 +811,8 @@ class TestSuitePanel(ttk.Frame):
                 if self._trigger_timing_var.get() == "After setup commands"
                 else "before_setup"
             )
-            manual = self._manual_var.get()
+            manual   = self._manual_var.get()
+            log_only = self._log_only_var.get()
 
             if tc is not None:
                 tc.name              = name
@@ -811,6 +827,7 @@ class TestSuitePanel(ttk.Frame):
                 tc.trigger_commands  = trigger_cmds
                 tc.trigger_timing    = trigger_timing
                 tc.manual            = manual
+                tc.log_only          = log_only
             else:
                 new_tc = TestCase(
                     name=name,
@@ -825,6 +842,7 @@ class TestSuitePanel(ttk.Frame):
                     trigger_commands=trigger_cmds,
                     trigger_timing=trigger_timing,
                     manual=manual,
+                    log_only=log_only,
                 )
                 self._tests.append(new_tc)
 
@@ -1015,7 +1033,7 @@ class TestSuitePanel(ttk.Frame):
             self._tree.item(result.test.id, tags=(status,))
 
         # Also append to the results log panel below
-        _ICON = {"PASS": "✔", "FAIL": "✘", "TIMEOUT": "⏱", "ERROR": "⚠"}
+        _ICON = {"PASS": "✔", "FAIL": "✘", "TIMEOUT": "⏱", "ERROR": "⚠", "LOG": "◉"}
         actual_preview = result.actual.replace("\n", " | ")[:50]
         line = (
             f" {_ICON.get(status, '?')} {status:<7s}  {result.test.name}  "
@@ -1030,7 +1048,7 @@ class TestSuitePanel(ttk.Frame):
 
         if status == "PASS":
             self._pass_count += 1
-        else:
+        elif status != "LOG":
             self._fail_count += 1
 
         done = self._pass_count + self._fail_count
