@@ -9,6 +9,43 @@ _MAX_TERMINALS = 4
 _MAX_SUITES = 4
 
 
+def _calculate_sash_positions(
+    panes: list,
+    collapsed: set,
+    total_width: int,
+    collapsed_width: int = 50,
+) -> list:
+    """Return the desired sash pixel positions for a horizontal PanedWindow.
+
+    Parameters
+    ----------
+    panes:          Ordered list of pane identifier strings (from paned.panes()).
+    collapsed:      Set of pane identifiers that are currently collapsed.
+    total_width:    Current pixel width of the PanedWindow widget.
+    collapsed_width: Fixed pixel width allocated to each collapsed pane.
+
+    Returns
+    -------
+    A list of ``len(panes) - 1`` absolute pixel positions, one per sash.
+    Returns an empty list when there is only one pane (no sashes exist).
+    """
+    n = len(panes)
+    if n <= 1:
+        return []
+
+    n_collapsed = sum(1 for p in panes if p in collapsed)
+    n_expanded = n - n_collapsed
+    cw = collapsed_width
+    ew = (total_width - n_collapsed * cw) // max(n_expanded, 1)
+
+    positions = []
+    pos = 0
+    for pane_id in panes[:-1]:
+        pos += cw if pane_id in collapsed else ew
+        positions.append(pos)
+    return positions
+
+
 class MainWindow:
     def __init__(self, root: tk.Tk, config: AppConfig) -> None:
         self.root = root
@@ -17,6 +54,7 @@ class MainWindow:
         self._panes: list = []         # TerminalPane instances
         self._suite_panels: list = []  # TestSuitePanel instances
         self._suite_configs: list = [] # AppConfig per suite (index 0 == self._config)
+        self._suite_collapsed_frames: set = set()  # str(frame) keys of collapsed suite panes
 
         self._setup_window()
         self._create_widgets()
@@ -194,12 +232,27 @@ class MainWindow:
         self._add_suite_btn.config(state="normal" if n < _MAX_SUITES else "disabled")
         self._remove_suite_btn.config(state="normal" if n > 1 else "disabled")
 
+    _COLLAPSED_SUITE_WIDTH = 50  # px reserved for a collapsed suite pane
+
     def _on_suite_collapse(self, collapsed: bool, frame: ttk.LabelFrame) -> None:
         if collapsed:
-            self._suite_paned.pane(frame, weight=0, minsize=50)
+            self._suite_collapsed_frames.add(str(frame))
+            self._suite_paned.pane(frame, weight=0)
         else:
-            self._suite_paned.pane(frame, weight=1, minsize=1)
-            self._suite_paned.update_idletasks()
+            self._suite_collapsed_frames.discard(str(frame))
+            self._suite_paned.pane(frame, weight=1)
+        self._rebalance_suite_sashes()
+
+    def _rebalance_suite_sashes(self) -> None:
+        paned = self._suite_paned
+        paned.update_idletasks()
+        panes = list(paned.panes())
+        positions = _calculate_sash_positions(
+            panes, self._suite_collapsed_frames,
+            paned.winfo_width(), self._COLLAPSED_SUITE_WIDTH,
+        )
+        for sash_idx, pos in enumerate(positions):
+            paned.sashpos(sash_idx, pos)
 
     # ------------------------------------------------------------------ #
     #  Shutdown

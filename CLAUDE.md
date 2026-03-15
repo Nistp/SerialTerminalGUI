@@ -27,7 +27,8 @@ SerialTerminalGUI/
 │   ├── test_config.py             # AppConfig: load, save, migration, terminal helpers
 │   ├── test_serial_handler.py     # SerialHandler: state, capture mode, read loop
 │   ├── test_logger.py             # SessionLogger: lifecycle, file naming, write format
-│   └── test_runner.py             # Numeric checks, TestCase serialisation, TestRunner execution
+│   ├── test_runner.py             # Numeric checks, TestCase serialisation, TestRunner execution
+│   └── test_main_window.py        # _calculate_sash_positions: collapse/expand sash layout logic
 └── app/
     ├── config.py                  # Constants (BAUD_RATES, LINE_ENDINGS, PARITIES…) + JSON persistence
     ├── serial_handler.py          # PySerial wrapper + threaded reader + capture mode
@@ -206,11 +207,12 @@ Tests live in `tests/` and require only `pytest` (no hardware). Run with `python
 | `tests/test_serial_handler.py` | `app/serial_handler.py` | `TerminalMessage` immutability, `is_connected` state, capture mode queue lifecycle, `send()` raises when disconnected, `_read_loop` via mock serial (line splitting, CR stripping, capture fan-out, error handling, UTF-8 replacement) |
 | `tests/test_logger.py` | `app/logger.py` | `open_session` creates file with correct name pattern, `write` format (ISO timestamp + direction + text), `close_session` resets state, all no-op safety paths |
 | `tests/test_runner.py` | `app/test_runner.py` | `_expand_escapes`, all 6 numeric operators + range + prefix + error cases, `TestCase` to/from dict round-trip, `TestRunner` PASS / FAIL / TIMEOUT / ERROR / LOG / stop mid-run / manual verdict / trigger dispatch |
+| `tests/test_main_window.py` | `app/gui/main_window.py` (`_calculate_sash_positions`) | Single pane (no-op), 2–4 panes with none / one / multiple / all panes collapsed, custom `collapsed_width`, integer-division truncation |
 
 ### Testing approach — no real serial port needed
 `FakeSerialHandler` (in `test_runner.py`) subclasses `SerialHandler`, overrides `is_connected` and `send()`. When `send()` is called it injects pre-defined response lines directly into `_capture_queue`, bypassing the read thread entirely. The read loop is tested separately in `test_serial_handler.py` via a `MagicMock` serial object whose `read()` side-effect feeds byte chunks on demand.
 
-GUI modules (`main_window.py`, `terminal_pane.py`, `connection_panel.py`, `terminal_panel.py`, `command_panel.py`, `test_suite_panel.py`) are not unit-tested — they require a Tk event loop and real widget construction. All non-trivial logic in those files delegates to the tested modules above.
+GUI modules (`main_window.py`, `terminal_pane.py`, `connection_panel.py`, `terminal_panel.py`, `command_panel.py`, `test_suite_panel.py`) are not unit-tested — they require a Tk event loop and real widget construction. Non-trivial pure logic is extracted to module-level functions (e.g. `_calculate_sash_positions` in `main_window.py`) so it can be tested without Tk.
 
 ## Conventions
 
@@ -223,5 +225,5 @@ GUI modules (`main_window.py`, `terminal_pane.py`, `connection_panel.py`, `termi
 - **Loop interval**: when "↻ Loop" is active and the interval spinbox is > 0, `_on_done` calls `_start_loop_countdown(seconds)` instead of restarting immediately. `_tick_loop_countdown` reschedules itself every 1 s via `self.after(1000, …)`, stores the `after()` ID in `_loop_after_id`, and updates the summary bar with "next run in Xs". When the countdown reaches 0 it calls `_start_run`. Clicking Stop during a countdown cancels the pending `after()` call and re-enables the run buttons immediately.
 - The Treeview nav column shows `L` when `log_only=True`, `M` when `manual=True`, `⚙` when setup/teardown/trigger commands are present, with combinations like `LM⚙` possible.
 - **Suite config export/import**: `_export_suite_config()` serialises `self._tests` to a JSON file (`{"tests": [...]}`) via `filedialog.asksaveasfilename`. `_import_suite_config()` reads the same format back; when the suite already has tests it asks the user to choose replace or append. On append, any imported test whose `id` collides with an existing one gets a fresh UUID to avoid duplicates. Both methods call `_save_tests_to_config()` after mutating `self._tests`.
-- **Collapsible suite panes**: Each `TestSuitePanel` has a slim header row (grid row 0, always visible) containing the suite label and a `◀`/`▶` toggle button. `_collapse()` calls `grid_remove()` on all 7 content widgets (Device Connection, Trigger Device, Toolbar, Treeview, Run bar, Results, Summary bar), fires `on_collapse_toggle(True)` callback → `MainWindow._on_suite_collapse()` sets `paned.pane(frame, weight=0, minsize=50)` to shrink the sash. `_expand()` reverses this with `weight=1, minsize=1` and `update_idletasks()`. Running tests in a collapsed pane are unaffected — `grid_remove` is visual only. Collapsed state is not persisted to config.
+- **Collapsible suite panes**: Each `TestSuitePanel` has a slim header row (grid row 0, always visible) containing the suite label and a `◀`/`▶` toggle button. `_collapse()` calls `grid_remove()` on all 7 content widgets (Device Connection, Trigger Device, Toolbar, Treeview, Run bar, Results, Summary bar), fires `on_collapse_toggle(True)` callback → `MainWindow._on_suite_collapse()`. On collapse, the pane's `weight` is set to 0; on expand, `weight=1`. After either, `_rebalance_suite_sashes()` calls `_calculate_sash_positions()` to compute equal-width sash positions for all expanded panes (collapsed panes get a fixed 50 px) and applies them via `paned.sashpos()`. This ensures every expand restores a consistent, screen-filling layout regardless of how many panes are open. Running tests in a collapsed pane are unaffected — `grid_remove` is visual only. Collapsed state is not persisted to config. Note: `ttk.PanedWindow.pane()` only accepts `weight` (not `minsize` — that is a `tk.PanedWindow`-only option).
 - `CommandPanel` special-char buttons (ESC / TAB / ^C) send a single control character with **no** line ending appended, using `on_send(char, b"")`.
