@@ -77,7 +77,7 @@ TX commands are **not** read back from the serial port. Instead `_on_send_reques
 - `MainWindow` keeps `_suite_panels: list[TestSuitePanel]` and `_suite_configs: list[AppConfig]`. Suite 1 shares `self._config` (`config_1.json`); Suites 2–4 get their own `AppConfig` instances loaded from `config_2.json` / `config_3.json` / `config_4.json` on demand.
 - `suite_count` in `config_1.json` persists how many suites were open. Migrated from the old `suite_2_visible` boolean on first launch.
 - Each `TestSuitePanel` **owns** its own `SerialHandler` (`self._suite_handler`). Suite panels have their own **Device Connection** section and can connect to different ports and **run in parallel** — there is no interlock.
-- The suite handler's `rx_queue` is drained by `_poll_suite_queue()` into a 3-line `tk.Text` mini-log widget at the top of the suite tab. ERROR messages from the reader thread trigger `_handle_suite_error_disconnect()` which disconnects and stops the runner.
+- The suite handler's `rx_queue` is drained by `_poll_suite_queue()` into an expandable `tk.Text` mini-log widget in the top pane of the suite tab. ERROR messages from the reader thread trigger `_handle_suite_error_disconnect()` which disconnects and stops the runner.
 - `cleanup()` on each `TestSuitePanel` disconnects both `_suite_handler` and `_trigger_handler`, and calls `_runner.stop()`.
 
 ### Config persistence
@@ -91,16 +91,19 @@ TX commands are **not** read back from the serial port. Instead `_on_send_reques
 - `log_dir` inside each terminal dict: empty string means `~/serial_logs`. `AppConfig.effective_log_dir_for(terminal_cfg)` resolves it.
 - Suite-specific connection keys (per suite config): `suite_port`, `suite_baud`, `suite_parity`, `suite_line_ending`.
 - `trigger_port` / `trigger_baud`: last-used trigger device port and baud rate (saved when trigger connects).
+- `persistent_csv` (boolean, default `false`): when `true`, `_current_csv_path` is kept alive across consecutive runs and after Stop — all results append to the same `test_run_<timestamp>.csv` until "Clear Results" is clicked. Saved when the "Persistent log" checkbox changes.
 
 ### CSV output files
 Two CSV files are written to each suite's configured log folder on each test run:
 
 | File | Written | Format |
 |------|---------|--------|
-| `test_run_<timestamp>.csv` | Created at run start, one wide-format row appended per loop iteration | Columns: `Run_Start`, `Run_End`, then `<name>_Status` + `<name>_Actual` for every test in the suite |
+| `test_run_<timestamp>.csv` | Created at run start (or reused when persistent log is active), one wide-format row appended per run/loop iteration | Columns: `Run_Start`, `Run_End`, then `<name>_Status` + `<name>_Actual` for every test in the suite |
 | `test_suite_log.csv` | One row appended per run completion | Columns: `Timestamp`, then one column per test name (value = status or blank if not in this run) |
 
-In loop mode the per-run CSV accumulates one row per iteration; a new file is only created when a fresh run starts (i.e. after a non-looping run ends or Stop is pressed).
+**Normal mode** (Persistent log off): a new `test_run_<timestamp>.csv` is created at the start of each run. The file is closed (path reset to `None`) when the run finishes or Stop is pressed, so the next run always opens a fresh file.
+
+**Persistent log mode** (Persistent log on): the same `test_run_<timestamp>.csv` is reused across all subsequent runs — including loop iterations, stopped runs, and manual re-runs — until the user clicks "Clear Results". Clicking "Clear Results" always resets the path regardless of this setting, so the next run opens a fresh file. The results panel header shows `"CSV (new) → …"` on first creation and `"CSV (appending) → …"` on subsequent runs within the same session.
 
 ## GUI layout
 
@@ -119,16 +122,19 @@ ttk.Notebook
     ├── Toolbar   [＋ Add Suite]  [－ Remove Suite]   (max 4 panes)
     └── ttk.PanedWindow (horizontal, holds 1–4 TestSuitePanel columns)
         └── Each suite pane (TestSuitePanel) contains:
-            ├── Device Connection  (Port / Refresh / Baud / Line ending / [Connect Device])
-            │                      (mini 3-line connection log)
-            │                      (Log folder entry / [Browse…])
-            ├── Trigger Device     (Port / Refresh / Baud / [Connect Trigger])
-            ├── Collapse header    (Suite N label + ◀/▶ toggle button — always visible)
-            ├── Toolbar            (Add / Edit / Delete / Up / Down | Export… / Import…)
-            ├── Treeview           (✓ | ⚙ | Name | Command | Expected | Terminator | Timeout | Result)
-            ├── Run bar            (Run Selected / Run All / Stop / ↻ Loop / loop interval spinbox / delay spinbox)
-            ├── Results panel      (ScrolledText with coloured background boxes per result)
-            └── Summary bar        (pass count / Export CSV… / Clear Results)
+            ├── Header row         (Suite N label + [▲ Hide Tests] + [◀/▶ collapse] — always visible)
+            └── ttk.PanedWindow (vertical, draggable sash between connection area and test area)
+                ├── Top pane (connection area)
+                │   ├── Device Connection  (Port / Refresh / Baud / Line ending / [Connect Device])
+                │   │                      (expandable connection log — fills top pane)
+                │   │                      (Log folder entry / [Browse…])
+                │   └── Trigger Device     (Port / Refresh / Baud / [Connect Trigger])
+                └── Bottom pane (test suite area — hidden by [▲ Hide Tests])
+                    ├── Toolbar            (Add / Edit / Delete / Up / Down | Export… / Import…)
+                    ├── Treeview           (✓ | ⚙ | Name | Command | Expected | Terminator | Timeout | Result)
+                    ├── Run bar            (Run Selected / Run All / Stop / ↻ Loop / interval / Persistent log / delay)
+                    ├── Results panel      (ScrolledText with coloured background boxes per result)
+                    └── Summary bar        (pass count / Export CSV… / Clear Results)
 ```
 
 ## Terminal colour scheme
@@ -221,9 +227,12 @@ GUI modules (`main_window.py`, `terminal_pane.py`, `connection_panel.py`, `termi
 - `TerminalConfigProxy` (in `terminal_pane.py`) is the bridge between a flat config-like interface (expected by `ConnectionPanel`) and the per-terminal slice in `AppConfig.terminals[i]`. It must cover every `self._config` call made by `ConnectionPanel`, `TerminalPanel`, and `CommandPanel`.
 - `TestSuitePanel` owns its `SerialHandler` directly (`self._suite_handler`). There is no `handler_provider` lambda — the suite panel creates, connects, and disconnects its own handler.
 - `_result_map: dict[test_id → (label, status)]` in `TestSuitePanel` persists results across tree repopulations (e.g. after reorder), and is cleared by "Clear Results" or at the start of each new run.
-- `_current_csv_path` in `TestSuitePanel` tracks the active per-run CSV across loop iterations; it is set to `None` when a non-looping run finishes or Stop is pressed, causing the next run to open a fresh file.
+- `_current_csv_path` in `TestSuitePanel` tracks the active per-run CSV. In normal mode it is set to `None` when a non-looping run finishes or Stop is pressed, causing the next run to open a fresh file. When the "Persistent log" checkbox is enabled, the path is kept alive across runs and is only reset by "Clear Results".
 - **Loop interval**: when "↻ Loop" is active and the interval spinbox is > 0, `_on_done` calls `_start_loop_countdown(seconds)` instead of restarting immediately. `_tick_loop_countdown` reschedules itself every 1 s via `self.after(1000, …)`, stores the `after()` ID in `_loop_after_id`, and updates the summary bar with "next run in Xs". When the countdown reaches 0 it calls `_start_run`. Clicking Stop during a countdown cancels the pending `after()` call and re-enables the run buttons immediately.
 - The Treeview nav column shows `L` when `log_only=True`, `M` when `manual=True`, `⚙` when setup/teardown/trigger commands are present, with combinations like `LM⚙` possible.
 - **Suite config export/import**: `_export_suite_config()` serialises `self._tests` to a JSON file (`{"tests": [...]}`) via `filedialog.asksaveasfilename`. `_import_suite_config()` reads the same format back; when the suite already has tests it asks the user to choose replace or append. On append, any imported test whose `id` collides with an existing one gets a fresh UUID to avoid duplicates. Both methods call `_save_tests_to_config()` after mutating `self._tests`.
-- **Collapsible suite panes**: Each `TestSuitePanel` has a slim header row (grid row 0, always visible) containing the suite label and a `◀`/`▶` toggle button. `_collapse()` calls `grid_remove()` on all 7 content widgets (Device Connection, Trigger Device, Toolbar, Treeview, Run bar, Results, Summary bar), fires `on_collapse_toggle(True)` callback → `MainWindow._on_suite_collapse()`. On collapse, the pane's `weight` is set to 0; on expand, `weight=1`. After either, `_rebalance_suite_sashes()` calls `_calculate_sash_positions()` to compute equal-width sash positions for all expanded panes (collapsed panes get a fixed 50 px) and applies them via `paned.sashpos()`. This ensures every expand restores a consistent, screen-filling layout regardless of how many panes are open. Running tests in a collapsed pane are unaffected — `grid_remove` is visual only. Collapsed state is not persisted to config. Note: `ttk.PanedWindow.pane()` only accepts `weight` (not `minsize` — that is a `tk.PanedWindow`-only option).
+- **Collapsible suite panes**: Each `TestSuitePanel` has a slim header row (grid row 0, always visible) containing the suite label, a `▲ Hide Tests` / `▼ Show Tests` toggle, and a `◀`/`▶` collapse toggle. `_collapse()` calls `grid_remove()` on `self._vpaned` (the vertical PanedWindow that holds all content), fires `on_collapse_toggle(True)` callback → `MainWindow._on_suite_collapse()`. On collapse, the pane's `weight` is set to 0; on expand, `weight=1`. After either, `_rebalance_suite_sashes()` calls `_calculate_sash_positions()` to compute equal-width sash positions for all expanded panes (collapsed panes get a fixed 50 px) and applies them via `paned.sashpos()`. This ensures every expand restores a consistent, screen-filling layout regardless of how many panes are open. Running tests in a collapsed pane are unaffected — `grid_remove` is visual only. Collapsed state is not persisted to config. Note: `ttk.PanedWindow.pane()` only accepts `weight` (not `minsize` — that is a `tk.PanedWindow`-only option).
+- **Hide Tests toggle**: The `▲ Hide Tests` button in the header calls `_toggle_tests_visible()`. When hiding, `self._vpaned.forget(self._bottom_frame)` removes the test suite area from the vertical PanedWindow, leaving only the connection log visible. When showing, `self._vpaned.add(self._bottom_frame, weight=3)` restores it. `_tests_hidden` tracks state. This is independent of the ◀/▶ pane-level collapse.
+- **Expandable connection log**: The Device Connection mini-log (`_suite_log`) has no fixed height. It expands to fill the top pane of the vertical PanedWindow. Dragging the sash up gives more space to the log; dragging it down gives more space to the test suite area.
+- **Expandable port comboboxes**: Port comboboxes in both Device Connection and Trigger Device use `grid` layout with `columnconfigure(1, weight=1)` so the port combo stretches to fill available pane width. Baud, Line ending, and Connect controls remain fixed-width to the right.
 - `CommandPanel` special-char buttons (ESC / TAB / ^C) send a single control character with **no** line ending appended, using `on_send(char, b"")`.
