@@ -85,17 +85,18 @@ class TestSuitePanel(ttk.Frame):
         self._run_timestamps: List[datetime.datetime] = []
         # Loop mode state
         self._loop_var = tk.BooleanVar(value=False)
+        self._persistent_csv_var = tk.BooleanVar(value=self._config.get("persistent_csv", False))
         self._current_run_tests: List[TestCase] = []
         self._stop_requested: bool = False
         self._loop_after_id = None   # after() ID while a loop-interval countdown is pending
+        self._tests_hidden: bool = False
 
         self._setup_ui()
         self._load_tests_from_config()
 
     def _setup_ui(self) -> None:
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(4, weight=2)
-        self.rowconfigure(6, weight=1)
+        self.rowconfigure(1, weight=1)  # vertical paned window fills remaining space
 
         # --- Collapse header (row 0, always visible) ---
         header_row = ttk.Frame(self)
@@ -108,34 +109,53 @@ class TestSuitePanel(ttk.Frame):
             font=("TkDefaultFont", 9, "bold"),
         ).grid(row=0, column=0, sticky="w", padx=2)
 
+        self._hide_tests_btn = ttk.Button(
+            header_row, text="▲ Hide Tests", width=12,
+            command=self._toggle_tests_visible,
+        )
+        self._hide_tests_btn.grid(row=0, column=1, sticky="e", padx=2)
+
         self._collapse_btn = ttk.Button(
             header_row, text="◀", width=2, command=self.toggle_collapse
         )
-        self._collapse_btn.grid(row=0, column=1, sticky="e", padx=2)
+        self._collapse_btn.grid(row=0, column=2, sticky="e", padx=2)
+
+        # --- Vertical PanedWindow (row 1): top = connection area, bottom = test suite area ---
+        self._vpaned = ttk.PanedWindow(self, orient="vertical")
+        self._vpaned.grid(row=1, column=0, sticky="nsew", padx=0, pady=0)
+
+        # ── Top frame: Device Connection + Trigger Device ──────────────── #
+        _top_frame = ttk.Frame(self._vpaned)
+        self._vpaned.add(_top_frame, weight=1)
+        _top_frame.columnconfigure(0, weight=1)
+        _top_frame.rowconfigure(0, weight=1)  # dev_frame (with log) expands vertically
 
         # --- Device Connection ---
-        dev_frame = ttk.LabelFrame(self, text="Device Connection")
-        dev_frame.grid(row=1, column=0, sticky="ew", padx=4, pady=(4, 0))
+        dev_frame = ttk.LabelFrame(_top_frame, text="Device Connection")
+        dev_frame.grid(row=0, column=0, sticky="nsew", padx=4, pady=(4, 0))
+        dev_frame.columnconfigure(0, weight=1)
+        dev_frame.rowconfigure(1, weight=1)  # log row expands when top pane is resized
 
-        # Row 0: controls
+        # Row 0: controls (grid layout so the port combo can expand)
         ctrl_row = ttk.Frame(dev_frame)
         ctrl_row.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 2))
+        ctrl_row.columnconfigure(1, weight=1)  # port combo column stretches
 
         self._suite_port_var   = tk.StringVar()
         self._suite_baud_var   = tk.StringVar(value=str(self._config.get("suite_baud", 115200)))
         self._suite_le_var     = tk.StringVar(value=self._config.get("suite_line_ending", "CRLF"))
         self._suite_log_dir_var = tk.StringVar(value=self._config.get("log_dir", ""))
 
-        ttk.Label(ctrl_row, text="Port:").pack(side="left", padx=(0, 2))
+        ttk.Label(ctrl_row, text="Port:").grid(row=0, column=0, sticky="w", padx=(0, 2))
         self._suite_port_combo = ttk.Combobox(
-            ctrl_row, textvariable=self._suite_port_var, width=14, state="readonly"
+            ctrl_row, textvariable=self._suite_port_var, width=8, state="readonly"
         )
-        self._suite_port_combo.pack(side="left", padx=2)
+        self._suite_port_combo.grid(row=0, column=1, sticky="ew", padx=2)
 
         ttk.Button(ctrl_row, text="⟳", width=2,
-                   command=self._refresh_suite_ports).pack(side="left", padx=2)
+                   command=self._refresh_suite_ports).grid(row=0, column=2, padx=2)
 
-        ttk.Label(ctrl_row, text="Baud:").pack(side="left", padx=(8, 2))
+        ttk.Label(ctrl_row, text="Baud:").grid(row=0, column=3, sticky="w", padx=(8, 2))
         self._suite_baud_combo = ttk.Combobox(
             ctrl_row,
             textvariable=self._suite_baud_var,
@@ -143,9 +163,9 @@ class TestSuitePanel(ttk.Frame):
             width=9,
             state="readonly",
         )
-        self._suite_baud_combo.pack(side="left", padx=2)
+        self._suite_baud_combo.grid(row=0, column=4, padx=2)
 
-        ttk.Label(ctrl_row, text="Line ending:").pack(side="left", padx=(8, 2))
+        ttk.Label(ctrl_row, text="Line ending:").grid(row=0, column=5, sticky="w", padx=(8, 2))
         self._suite_le_combo = ttk.Combobox(
             ctrl_row,
             textvariable=self._suite_le_var,
@@ -153,21 +173,21 @@ class TestSuitePanel(ttk.Frame):
             width=6,
             state="readonly",
         )
-        self._suite_le_combo.pack(side="left", padx=2)
+        self._suite_le_combo.grid(row=0, column=6, padx=2)
 
         self._suite_connect_btn = ttk.Button(
             ctrl_row, text="Connect Device", command=self._on_suite_connect_click
         )
-        self._suite_connect_btn.pack(side="left", padx=(8, 4))
+        self._suite_connect_btn.grid(row=0, column=7, padx=(8, 4))
 
-        # Row 1: mini connection log
+        # Row 1: mini connection log (expandable — no fixed height)
         log_row = ttk.Frame(dev_frame)
-        log_row.grid(row=1, column=0, sticky="ew", padx=4, pady=(0, 4))
+        log_row.grid(row=1, column=0, sticky="nsew", padx=4, pady=(0, 0))
         log_row.columnconfigure(0, weight=1)
+        log_row.rowconfigure(0, weight=1)
 
         self._suite_log = tk.Text(
             log_row,
-            height=3,
             state="disabled",
             bg="#1C1C1C",
             fg="#E0E0E0",
@@ -175,7 +195,7 @@ class TestSuitePanel(ttk.Frame):
             relief="flat",
             wrap="word",
         )
-        self._suite_log.grid(row=0, column=0, sticky="ew")
+        self._suite_log.grid(row=0, column=0, sticky="nsew")
         suite_log_sb = ttk.Scrollbar(log_row, orient="vertical", command=self._suite_log.yview)
         self._suite_log.configure(yscrollcommand=suite_log_sb.set)
         suite_log_sb.grid(row=0, column=1, sticky="ns")
@@ -205,8 +225,9 @@ class TestSuitePanel(ttk.Frame):
         self._dev_frame = dev_frame
 
         # --- Trigger Device ---
-        trigger_frame = ttk.LabelFrame(self, text="Trigger Device")
-        trigger_frame.grid(row=2, column=0, sticky="ew", padx=4, pady=(4, 0))
+        trigger_frame = ttk.LabelFrame(_top_frame, text="Trigger Device")
+        trigger_frame.grid(row=1, column=0, sticky="ew", padx=4, pady=(4, 4))
+        trigger_frame.columnconfigure(0, weight=1)
 
         self._trigger_port_var = tk.StringVar()
         self._trigger_baud_var = tk.StringVar(value=str(self._config.get("trigger_baud", 9600)))
@@ -214,36 +235,48 @@ class TestSuitePanel(ttk.Frame):
         self._trigger_port_map: dict = {}
         self._trigger_handler = SerialHandler()
 
-        ttk.Label(trigger_frame, text="Port:").pack(side="left", padx=(4, 2))
+        # Inner row (grid layout so the port combo can expand)
+        trig_ctrl = ttk.Frame(trigger_frame)
+        trig_ctrl.pack(fill="x", padx=4, pady=4)
+        trig_ctrl.columnconfigure(1, weight=1)  # port combo column stretches
+
+        ttk.Label(trig_ctrl, text="Port:").grid(row=0, column=0, sticky="w", padx=(0, 2))
         self._trigger_port_combo = ttk.Combobox(
-            trigger_frame, textvariable=self._trigger_port_var, width=14, state="readonly"
+            trig_ctrl, textvariable=self._trigger_port_var, width=8, state="readonly"
         )
-        self._trigger_port_combo.pack(side="left", padx=2)
+        self._trigger_port_combo.grid(row=0, column=1, sticky="ew", padx=2)
 
-        ttk.Button(trigger_frame, text="⟳", width=2,
-                   command=self._refresh_trigger_ports).pack(side="left", padx=2)
+        ttk.Button(trig_ctrl, text="⟳", width=2,
+                   command=self._refresh_trigger_ports).grid(row=0, column=2, padx=2)
 
-        ttk.Label(trigger_frame, text="Baud:").pack(side="left", padx=(8, 2))
+        ttk.Label(trig_ctrl, text="Baud:").grid(row=0, column=3, sticky="w", padx=(8, 2))
         self._trigger_baud_combo = ttk.Combobox(
-            trigger_frame,
+            trig_ctrl,
             textvariable=self._trigger_baud_var,
             values=[str(b) for b in BAUD_RATES],
             width=9,
             state="readonly",
         )
-        self._trigger_baud_combo.pack(side="left", padx=2)
+        self._trigger_baud_combo.grid(row=0, column=4, padx=2)
 
         self._trigger_connect_btn = ttk.Button(
-            trigger_frame, text="Connect Trigger", command=self._on_trigger_connect_click
+            trig_ctrl, text="Connect Trigger", command=self._on_trigger_connect_click
         )
-        self._trigger_connect_btn.pack(side="left", padx=(8, 4))
+        self._trigger_connect_btn.grid(row=0, column=5, padx=(8, 4))
 
         self._refresh_trigger_ports()
         self._trigger_frame = trigger_frame
 
+        # ── Bottom frame: Toolbar + Treeview + Run bar + Results + Summary ─ #
+        self._bottom_frame = ttk.Frame(self._vpaned)
+        self._vpaned.add(self._bottom_frame, weight=3)
+        self._bottom_frame.columnconfigure(0, weight=1)
+        self._bottom_frame.rowconfigure(1, weight=2)  # treeview expands
+        self._bottom_frame.rowconfigure(3, weight=1)  # results expands
+
         # --- Toolbar ---
-        toolbar = ttk.Frame(self)
-        toolbar.grid(row=3, column=0, sticky="ew", padx=4, pady=(4, 0))
+        toolbar = ttk.Frame(self._bottom_frame)
+        toolbar.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 0))
 
         ttk.Button(toolbar, text="+ Add",   command=self._add_test).pack(side="left", padx=2)
         ttk.Button(toolbar, text="Edit",    command=self._edit_test).pack(side="left", padx=2)
@@ -256,8 +289,8 @@ class TestSuitePanel(ttk.Frame):
         self._toolbar_frame = toolbar
 
         # --- Treeview ---
-        tree_frame = ttk.Frame(self)
-        tree_frame.grid(row=4, column=0, sticky="nsew", padx=4, pady=4)
+        tree_frame = ttk.Frame(self._bottom_frame)
+        tree_frame.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
         tree_frame.columnconfigure(0, weight=1)
         tree_frame.rowconfigure(0, weight=1)
 
@@ -284,8 +317,8 @@ class TestSuitePanel(ttk.Frame):
         self._tree_frame = tree_frame
 
         # --- Run bar ---
-        run_bar = ttk.Frame(self)
-        run_bar.grid(row=5, column=0, sticky="ew", padx=4, pady=2)
+        run_bar = ttk.Frame(self._bottom_frame)
+        run_bar.grid(row=2, column=0, sticky="ew", padx=4, pady=2)
 
         self._run_sel_btn = ttk.Button(
             run_bar, text="▶ Run Selected", command=self._run_selected
@@ -310,6 +343,12 @@ class TestSuitePanel(ttk.Frame):
                     textvariable=self._loop_interval_var, width=5).pack(side="left", padx=(0, 4))
 
         ttk.Separator(run_bar, orient="vertical").pack(side="left", padx=8, fill="y")
+        ttk.Checkbutton(
+            run_bar, text="Persistent log", variable=self._persistent_csv_var,
+            command=self._on_persistent_csv_change,
+        ).pack(side="left", padx=2)
+
+        ttk.Separator(run_bar, orient="vertical").pack(side="left", padx=8, fill="y")
         ttk.Label(run_bar, text="Delay between tests (ms):").pack(side="left")
         self._delay_var = tk.StringVar(value=str(self._config.get("test_delay_ms", 200)))
         ttk.Spinbox(run_bar, from_=0, to=10000, increment=50,
@@ -318,7 +357,7 @@ class TestSuitePanel(ttk.Frame):
 
         # --- Results panel ---
         self._results = scrolledtext.ScrolledText(
-            self,
+            self._bottom_frame,
             state="disabled",
             font=("Courier", 9),
             bg="#1C1C1C",
@@ -326,14 +365,14 @@ class TestSuitePanel(ttk.Frame):
             height=8,
             relief="flat",
         )
-        self._results.grid(row=6, column=0, sticky="nsew", padx=4, pady=(0, 2))
+        self._results.grid(row=3, column=0, sticky="nsew", padx=4, pady=(0, 2))
         for status, colors in _RESULT_TAGS.items():
             self._results.tag_configure(status, **colors, font=("Courier", 9, "bold"))
         self._results.tag_configure("header", foreground="#AAAAAA")
 
         # --- Summary bar ---
-        summary_bar = ttk.Frame(self)
-        summary_bar.grid(row=7, column=0, sticky="ew", padx=4, pady=(0, 4))
+        summary_bar = ttk.Frame(self._bottom_frame)
+        summary_bar.grid(row=4, column=0, sticky="ew", padx=4, pady=(0, 4))
 
         self._summary_var = tk.StringVar(value="No results yet")
         ttk.Label(summary_bar, textvariable=self._summary_var).pack(side="left")
@@ -513,6 +552,10 @@ class TestSuitePanel(ttk.Frame):
 
     def _on_suite_log_dir_change(self, *_) -> None:
         self._config["log_dir"] = self._suite_log_dir_var.get().strip()
+        self._config.save()
+
+    def _on_persistent_csv_change(self) -> None:
+        self._config["persistent_csv"] = self._persistent_csv_var.get()
         self._config.save()
 
     def _append_suite_log(self, msg: TerminalMessage) -> None:
@@ -979,17 +1022,19 @@ class TestSuitePanel(ttk.Frame):
             f"── Running {len(tests)} test(s) ──", "header"
         )
 
-        # Create a new CSV only on a fresh start; loop continuations reuse the same file
+        # Create a new CSV on a fresh start; reuse across runs when persistent log is on
         if self._current_csv_path is None:
             try:
                 log_dir = self._config.effective_log_dir()
                 log_dir.mkdir(parents=True, exist_ok=True)
                 ts_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                 self._current_csv_path = log_dir / f"test_run_{ts_str}.csv"
-                self._append_result(f"  CSV → {self._current_csv_path}", "header")
+                self._append_result(f"  CSV (new) → {self._current_csv_path}", "header")
             except Exception as exc:
                 self._current_csv_path = None
                 self._append_result(f"  CSV setup failed: {exc}", "ERROR")
+        elif self._persistent_csv_var.get():
+            self._append_result(f"  CSV (appending) → {self._current_csv_path}", "header")
 
         self._run_sel_btn.config(state="disabled")
         self._run_all_btn.config(state="disabled")
@@ -1029,7 +1074,8 @@ class TestSuitePanel(ttk.Frame):
             self._loop_after_id = None
             total = self._pass_count + self._fail_count
             self._summary_var.set(f"{self._pass_count} / {total} passed")
-            self._current_csv_path = None
+            if not self._persistent_csv_var.get():
+                self._current_csv_path = None
             self._run_sel_btn.config(state="normal")
             self._run_all_btn.config(state="normal")
             self._stop_btn.config(state="disabled")
@@ -1126,8 +1172,9 @@ class TestSuitePanel(ttk.Frame):
                 self._start_run(self._current_run_tests)
             return
 
-        # Run has ended — next Start should open a fresh CSV
-        self._current_csv_path = None
+        # Run has ended — rotate CSV unless persistent log is active
+        if not self._persistent_csv_var.get():
+            self._current_csv_path = None
         self._run_sel_btn.config(state="normal")
         self._run_all_btn.config(state="normal")
         self._stop_btn.config(state="disabled")
@@ -1244,6 +1291,7 @@ class TestSuitePanel(ttk.Frame):
         self._results.config(state="disabled")
         self._summary_var.set("No results yet")
         self._result_map.clear()
+        self._current_csv_path = None  # always start a fresh CSV after clearing
         for iid in self._tree.get_children():
             self._tree.set(iid, "result", "")
             self._tree.item(iid, tags=())
@@ -1259,24 +1307,29 @@ class TestSuitePanel(ttk.Frame):
             self._collapse()
 
     def _collapse(self) -> None:
-        for w in (self._dev_frame, self._trigger_frame, self._toolbar_frame,
-                  self._tree_frame, self._run_bar_frame, self._results,
-                  self._summary_bar_frame):
-            w.grid_remove()
+        self._vpaned.grid_remove()
         self._collapse_btn.config(text="▶")
         self._collapsed = True
         if self._on_collapse_toggle:
             self._on_collapse_toggle(True)
 
     def _expand(self) -> None:
-        for w in (self._dev_frame, self._trigger_frame, self._toolbar_frame,
-                  self._tree_frame, self._run_bar_frame, self._results,
-                  self._summary_bar_frame):
-            w.grid()
+        self._vpaned.grid()
         self._collapse_btn.config(text="◀")
         self._collapsed = False
         if self._on_collapse_toggle:
             self._on_collapse_toggle(False)
+
+    def _toggle_tests_visible(self) -> None:
+        """Show or hide the test suite area (bottom pane) while keeping the terminal log visible."""
+        if self._tests_hidden:
+            self._vpaned.add(self._bottom_frame, weight=3)
+            self._hide_tests_btn.config(text="▲ Hide Tests")
+            self._tests_hidden = False
+        else:
+            self._vpaned.forget(self._bottom_frame)
+            self._hide_tests_btn.config(text="▼ Show Tests")
+            self._tests_hidden = True
 
     # ------------------------------------------------------------------ #
     #  Suite config export / import
